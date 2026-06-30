@@ -23,7 +23,7 @@ curl -I https://zquzxuuoicheutirlxxc.supabase.co
 
 ## 2. 上传代码
 
-推荐方式是在 NAS 终端里直接克隆 GitHub 仓库，这样以后 Mac 修改后，NAS 可以一条命令同步更新：
+如果 NAS 有 `git`，推荐方式是在 NAS 终端里直接克隆 GitHub 仓库，这样以后 Mac 修改后，NAS 可以一条命令同步更新：
 
 ```bash
 mkdir -p /volume1/docker
@@ -37,7 +37,9 @@ git clone https://github.com/CYYY-1230/street-image.git
 /volume1/docker/street-image-main
 ```
 
-但 ZIP 上传方式后续不能直接 `git pull`，更新时需要重新上传代码文件夹。不同绿联系统的实际路径可能不同，可以在 NAS 终端里用 `pwd` 查看当前位置。
+不同绿联系统的实际路径可能不同，可以在 NAS 终端里用 `pwd` 查看当前位置。
+
+如果 NAS 没有 `git`，建议使用“镜像版部署”。Mac 上每次 push 到 GitHub 后，GitHub 会自动构建 Docker 镜像；NAS 只需要拉取最新镜像，不需要拉源码。
 
 ## 3. 创建 .env
 
@@ -63,6 +65,14 @@ DEFAULT_SEGMENTATION_SERVICE_URL=http://117.50.216.65:9000/segment
 如果云 GPU 没启动，也可以先不管。下载和整理任务仍可运行；语义分割任务需要模型服务在线。
 
 ## 4. 启动
+
+如果 NAS 没有 `git`，优先使用镜像版：
+
+```bash
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+如果 NAS 是 `git clone` 源码方式，也可以使用源码构建版：
 
 ```bash
 docker compose up -d --build
@@ -105,6 +115,20 @@ https://street-image.vercel.app
 docker compose down
 ```
 
+如果 NAS 没有 `git`，Mac 上修改并 push 到 GitHub 后，等待 GitHub Actions 构建完成，然后在 NAS 上运行：
+
+```bash
+cd /volume1/docker/street-image-main/deploy/nas
+sh update_images.sh
+```
+
+它会自动执行：
+
+- 拉取最新 Docker 镜像
+- 保留 `deploy/nas/.env`
+- 保留 Docker volume 里的历史缓存和成果
+- 重启 `backend` 和 `worker`
+
 如果 NAS 是用 `git clone` 安装的，Mac 上修改并 push 到 GitHub 后，在 NAS 上运行：
 
 ```bash
@@ -122,7 +146,7 @@ sh update.sh
 如果只是本地改了代码但还没 push，NAS 不会看到这些改动。流程是：
 
 ```text
-Mac 修改代码 -> git push -> NAS sh update.sh -> 网站/Worker 使用新版本
+Mac 修改代码 -> git push -> NAS sh update_images.sh 或 sh update.sh -> 网站/Worker 使用新版本
 ```
 
 如果 NAS 是 ZIP 上传方式，更新代码后重建：

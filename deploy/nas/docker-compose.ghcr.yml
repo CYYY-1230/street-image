@@ -1,0 +1,43 @@
+services:
+  backend:
+    image: ghcr.io/cyyy-1230/street-image-backend:latest
+    container_name: streetscope-backend
+    restart: unless-stopped
+    environment:
+      STREETSCOPE_DATA_DIR: /data/backend
+      STREETSCOPE_CORS_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173,https://street-image.vercel.app"
+      STREETSCOPE_USER: ${STREETSCOPE_USER:-}
+      STREETSCOPE_PASSWORD: ${STREETSCOPE_PASSWORD:-}
+    volumes:
+      - streetscope-data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    image: ghcr.io/cyyy-1230/street-image-worker:latest
+    container_name: streetscope-worker
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      STREETSCOPE_ARTIFACT_BUCKET: ${STREETSCOPE_ARTIFACT_BUCKET:-streetscope-artifacts}
+      STREETSCOPE_LOCAL_API_BASE: ${STREETSCOPE_LOCAL_API_BASE:-http://backend:8000}
+      STREETSCOPE_WORKER_ID: ${STREETSCOPE_WORKER_ID:-ugreen-dh4300plus}
+      STREETSCOPE_WORKER_POLL_SECONDS: ${STREETSCOPE_WORKER_POLL_SECONDS:-5}
+      STREETSCOPE_WORKER_OUTPUT_DIR: /data/worker_artifacts
+      DEFAULT_SEGMENTATION_SERVICE_URL: ${DEFAULT_SEGMENTATION_SERVICE_URL:-}
+      STREETSCOPE_LOCAL_BASIC_AUTH: ${STREETSCOPE_LOCAL_BASIC_AUTH:-}
+    volumes:
+      - streetscope-data:/data
+
+volumes:
+  streetscope-data:
