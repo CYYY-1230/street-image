@@ -9,11 +9,10 @@ foreach ($Port in $Ports) {
   foreach ($conn in $connections) {
     $pidToStop = $conn.OwningProcess
     if ($pidToStop) {
-      Write-Host "停止端口 $Port 的进程 PID $pidToStop"
+      Write-Host "Stopping process on port $Port, PID $pidToStop"
       Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue
     }
   }
 }
 
-Write-Host "已尝试停止 StreetScope 本地服务。"
-
+Write-Host "StreetScope local services stop command finished."

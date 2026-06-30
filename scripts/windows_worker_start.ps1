@@ -9,19 +9,19 @@ $WorkerPython = "$WorkerVenv\Scripts\python.exe"
 $EnvFile = "$Root\worker\.env"
 
 if (-not (Test-Path $EnvFile)) {
-  Write-Host "缺少 worker\.env。请复制 worker\.env.example 为 worker\.env，并填入 Supabase 密钥。" -ForegroundColor Red
+  Write-Host "Missing worker\.env. Copy worker\.env.example to worker\.env and fill Supabase keys." -ForegroundColor Red
   exit 1
 }
 
 if (-not (Test-Path $WorkerPython)) {
-  Write-Host "创建 Worker Python 虚拟环境..."
+  Write-Host "Creating Worker Python virtual environment..."
   python -m venv $WorkerVenv
   & $WorkerPython -m pip install --upgrade pip
   & $WorkerPython -m pip install -r "$Root\worker\requirements.txt"
 }
 
 if ($StartLocalApp) {
-  Write-Host "同时启动本地 StreetScope 后端/前端..."
+  Write-Host "Starting local StreetScope backend/frontend..."
   powershell -ExecutionPolicy Bypass -File "$Root\scripts\windows_start.ps1"
 }
 
@@ -33,6 +33,5 @@ Get-Content $EnvFile | ForEach-Object {
   }
 }
 
-Write-Host "启动 StreetScope Windows Worker。请保持这个窗口打开。" -ForegroundColor Cyan
+Write-Host "Starting StreetScope Windows Worker. Keep this window open." -ForegroundColor Cyan
 & $WorkerPython "$Root\worker\cloud_worker.py"
-

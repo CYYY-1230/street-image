@@ -8,43 +8,42 @@ $Root = Split-Path -Parent $PSScriptRoot
 function Require-Command($Name, $InstallHint) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     Write-Host ""
-    Write-Host "缺少 $Name。" -ForegroundColor Red
+    Write-Host "Missing command: $Name" -ForegroundColor Red
     Write-Host $InstallHint
     exit 1
   }
 }
 
-Require-Command "python" "请先安装 Python 3.11 或 3.12，并勾选 Add python.exe to PATH。下载：https://www.python.org/downloads/windows/"
-Require-Command "node" "请先安装 Node.js LTS。下载：https://nodejs.org/"
-Require-Command "npm" "npm 会随 Node.js 一起安装；如果缺失，请重新安装 Node.js LTS。"
+Require-Command "python" "Install Python 3.11 or 3.12 first, and check 'Add python.exe to PATH'. Download: https://www.python.org/downloads/windows/"
+Require-Command "node" "Install Node.js LTS first. Download: https://nodejs.org/"
+Require-Command "npm" "npm is installed with Node.js. Reinstall Node.js LTS if npm is missing."
 
-Write-Host "== StreetScope Windows 安装 ==" -ForegroundColor Cyan
-Write-Host "项目目录：$Root"
+Write-Host "== StreetScope Windows install ==" -ForegroundColor Cyan
+Write-Host "Project root: $Root"
 
 Set-Location "$Root\backend"
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
-  Write-Host "创建 Python 虚拟环境..."
+  Write-Host "Creating Python virtual environment..."
   python -m venv .venv
 }
 
-Write-Host "安装后端依赖..."
+Write-Host "Installing backend dependencies..."
 & ".venv\Scripts\python.exe" -m pip install --upgrade pip
 & ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 
 Set-Location "$Root\frontend"
 if (-not (Test-Path "node_modules")) {
-  Write-Host "安装前端依赖..."
+  Write-Host "Installing frontend dependencies..."
   npm install
 } else {
-  Write-Host "前端依赖已存在，跳过 npm install。"
+  Write-Host "Frontend dependencies already exist. Skip npm install."
 }
 
 if ($DefaultSegmentationUrl.Trim()) {
   $EnvFile = "$Root\frontend\.env.local"
   "VITE_DEFAULT_SEGMENTATION_SERVICE_URL=$DefaultSegmentationUrl" | Out-File -FilePath $EnvFile -Encoding utf8
-  Write-Host "已写入默认模型服务地址：$DefaultSegmentationUrl"
+  Write-Host "Default segmentation URL written: $DefaultSegmentationUrl"
 }
 
 Write-Host ""
-Write-Host "安装完成。以后双击 scripts\windows_start.ps1 启动系统。" -ForegroundColor Green
-
+Write-Host "Install complete. Use scripts\windows_cloud_start.ps1 for cloud mode." -ForegroundColor Green
