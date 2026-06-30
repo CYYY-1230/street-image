@@ -169,6 +169,18 @@ function modelParts(modelName: string) {
   }
 }
 
+function artifactPaths(task: CloudTask): string[] {
+  const rawPath = task.artifact_path?.trim()
+  if (!rawPath) return []
+  if (!rawPath.startsWith('[')) return [rawPath]
+  try {
+    const parsed = JSON.parse(rawPath)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string' && item.length > 0) : [rawPath]
+  } catch {
+    return [rawPath]
+  }
+}
+
 const adminPresets: Record<string, Boundary> = {
   徐汇示范区: { north: 31.2006, south: 31.1906, east: 121.4485, west: 121.4355 },
   上海徐汇区: { north: 31.2208, south: 31.1392, east: 121.4976, west: 121.3972 },
@@ -432,6 +444,7 @@ function App() {
   const [cloudAuthMessage, setCloudAuthMessage] = useState('')
   const [cloudTasks, setCloudTasks] = useState<CloudTask[]>([])
   const [cloudSubmitting, setCloudSubmitting] = useState(false)
+  const cloudSubmitLock = useRef(false)
 
   const cloudReady = isSupabaseConfigured && Boolean(supabase) && Boolean(cloudUser)
 
@@ -534,28 +547,38 @@ function App() {
     if (!supabase || !cloudUser) {
       throw new Error('公网模式需要先登录云端账号，再由 NAS Worker 领取任务。')
     }
-    const { data: project, error: projectError } = await supabase
-      .from('streetscope_projects')
-      .insert({
+    if (cloudSubmitLock.current) {
+      throw new Error('任务正在提交，请不要重复点击。')
+    }
+    cloudSubmitLock.current = true
+    setCloudSubmitting(true)
+    try {
+      const { data: project, error: projectError } = await supabase
+        .from('streetscope_projects')
+        .insert({
+          user_id: cloudUser.id,
+          name: projectName || '未命名项目',
+          config: projectConfig,
+        })
+        .select('id')
+        .single()
+      if (projectError) throw projectError
+      const { error: taskError } = await supabase.from('streetscope_tasks').insert({
         user_id: cloudUser.id,
-        name: projectName || '未命名项目',
-        config: projectConfig,
+        project_id: project.id,
+        kind,
+        status: 'queued',
+        payload,
+        message,
       })
-      .select('id')
-      .single()
-    if (projectError) throw projectError
-    const { error: taskError } = await supabase.from('streetscope_tasks').insert({
-      user_id: cloudUser.id,
-      project_id: project.id,
-      kind,
-      status: 'queued',
-      payload,
-      message,
-    })
-    if (taskError) throw taskError
-    setCloudAuthMessage('云端任务已提交。NAS Worker 会自动领取、执行并上传结果。')
-    setActiveStep(nextStep)
-    await refreshCloudTasks()
+      if (taskError) throw taskError
+      setCloudAuthMessage('云端任务已提交。NAS Worker 会自动领取、执行并上传结果。')
+      setActiveStep(nextStep)
+      await refreshCloudTasks()
+    } finally {
+      cloudSubmitLock.current = false
+      setCloudSubmitting(false)
+    }
   }
 
   const refreshCloudTasks = async () => {
@@ -776,13 +799,10 @@ function App() {
         setError('官方 API Key 下载需要先填写百度 AK。')
         return
       }
-      setCloudSubmitting(true)
       try {
         await submitCloudTask('download', buildDownloadRequest(), '等待 NAS Worker 下载街景图像', 4)
       } catch (err) {
         setError(err instanceof Error ? err.message : '云端下载任务提交失败')
-      } finally {
-        setCloudSubmitting(false)
       }
       return
     }
@@ -927,7 +947,6 @@ function App() {
       setError('云端完整任务需要填写模型服务地址。')
       return
     }
-    setCloudSubmitting(true)
     setError('')
     try {
       await submitCloudTask(
@@ -941,21 +960,40 @@ function App() {
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : '云端任务提交失败')
-    } finally {
-      setCloudSubmitting(false)
     }
   }
 
-  const downloadCloudArtifact = async (task: CloudTask) => {
-    if (!supabase || !task.artifact_path) return
+  const downloadCloudArtifact = async (task: CloudTask, artifactPath: string) => {
+    if (!supabase || !artifactPath) return
     const { data, error: signError } = await supabase.storage
       .from(task.artifact_bucket || 'streetscope-artifacts')
-      .createSignedUrl(task.artifact_path, 60 * 10)
+      .createSignedUrl(artifactPath, 60 * 10)
     if (signError) {
       setError(signError.message)
       return
     }
     window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  const cancelQueuedCloudTask = async (task: CloudTask) => {
+    if (!supabase || task.status !== 'queued') return
+    setError('')
+    const { error: cancelError } = await supabase
+      .from('streetscope_tasks')
+      .update({
+        status: 'canceled',
+        message: '用户已取消排队任务',
+        error: 'canceled by user before worker pickup',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', task.id)
+      .eq('status', 'queued')
+    if (cancelError) {
+      setError(cancelError.message)
+      return
+    }
+    setCloudAuthMessage('已取消排队中的云端任务。')
+    await refreshCloudTasks()
   }
 
   const startUploadedImageMetrics = async (files: FileList | null) => {
@@ -1604,9 +1642,14 @@ function App() {
               </button>
             ))}
           </div>
-          <button type="button" className="secondary-action" onClick={startDownload} disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim())}>
-            <Download size={18} aria-hidden="true" />
-            {LOCAL_BACKEND_ENABLED ? '创建抓图任务' : '提交云端下载任务'}
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={startDownload}
+            disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim()) || (!LOCAL_BACKEND_ENABLED && cloudSubmitting)}
+          >
+            {!LOCAL_BACKEND_ENABLED && cloudSubmitting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Download size={18} aria-hidden="true" />}
+            {LOCAL_BACKEND_ENABLED ? '创建抓图任务' : cloudSubmitting ? '正在提交云端任务' : '提交云端下载任务'}
           </button>
           {!LOCAL_BACKEND_ENABLED ? <p className="inline-note">公网模式会把下载任务提交到 Supabase，由 NAS Worker 执行并上传 ZIP。</p> : null}
         </section>
@@ -1822,13 +1865,22 @@ function App() {
                     <strong>{task.kind === 'download_then_metrics' ? '完整生产任务' : task.kind}</strong>
                     <span>{task.status} · {task.progress}% · {task.message || task.error || '等待更新'}</span>
                   </div>
-                  {task.artifact_path ? (
-                    <button type="button" className="mini-action" onClick={() => downloadCloudArtifact(task)}>
-                      ZIP
-                    </button>
-                  ) : (
-                    <em>{task.succeeded}/{task.total || '-'}</em>
-                  )}
+                  <div className="cloud-task-actions">
+                    {task.status === 'queued' ? (
+                      <button type="button" className="mini-action" onClick={() => cancelQueuedCloudTask(task)}>
+                        取消
+                      </button>
+                    ) : null}
+                    {artifactPaths(task).length ? (
+                      artifactPaths(task).map((artifactPath, index, paths) => (
+                        <button type="button" className="mini-action" key={artifactPath} onClick={() => downloadCloudArtifact(task, artifactPath)}>
+                          {paths.length > 1 ? `ZIP ${index + 1}` : 'ZIP'}
+                        </button>
+                      ))
+                    ) : (
+                      <em>{task.succeeded}/{task.total || '-'}</em>
+                    )}
+                  </div>
                 </div>
               ))}
               {!cloudReady ? <p className="muted">登录云端账号后显示 Supabase 队列任务。</p> : null}

@@ -833,6 +833,13 @@ input[type="range"] {
   text-decoration: none;
 }
 
+.cloud-task-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .map-band {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;

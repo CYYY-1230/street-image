@@ -19,6 +19,7 @@ WORKER_ID = os.getenv("STREETSCOPE_WORKER_ID", f"worker-{uuid.uuid4().hex[:8]}")
 POLL_SECONDS = float(os.getenv("STREETSCOPE_WORKER_POLL_SECONDS", "5"))
 ARTIFACT_BUCKET = os.getenv("STREETSCOPE_ARTIFACT_BUCKET", "streetscope-artifacts")
 LOCAL_BASIC_AUTH = os.getenv("STREETSCOPE_LOCAL_BASIC_AUTH", "")
+ARTIFACT_MAX_BYTES = int(os.getenv("STREETSCOPE_ARTIFACT_MAX_BYTES", str(45 * 1024 * 1024)))
 
 
 def utc_now() -> str:
@@ -147,7 +148,7 @@ def download_export(local_task_id: str, output_dir: Path) -> Path:
     return output_path
 
 
-def upload_artifact(user_id: str, cloud_task_id: str, file_path: Path) -> str:
+def upload_single_artifact(user_id: str, cloud_task_id: str, file_path: Path) -> str:
     object_path = f"{user_id}/{cloud_task_id}/{file_path.name}"
     upload_url = f"{SUPABASE_URL}/storage/v1/object/{ARTIFACT_BUCKET}/{object_path}"
     headers = {
@@ -161,6 +162,47 @@ def upload_artifact(user_id: str, cloud_task_id: str, file_path: Path) -> str:
     if response.status_code >= 400:
         raise RuntimeError(f"Upload artifact failed: {response.status_code} {response.text[:800]}")
     return object_path
+
+
+def split_zip_archive(file_path: Path, max_bytes: int) -> list[Path]:
+    import zipfile
+
+    if file_path.stat().st_size <= max_bytes:
+        return [file_path]
+
+    parts_dir = file_path.with_suffix("")
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    groups: list[list[zipfile.ZipInfo]] = []
+    current: list[zipfile.ZipInfo] = []
+    current_size = 0
+    with zipfile.ZipFile(file_path, "r") as source:
+        for info in source.infolist():
+            if info.is_dir():
+                continue
+            estimated_size = max(info.compress_size, info.file_size, 1) + 1024
+            if current and current_size + estimated_size > max_bytes:
+                groups.append(current)
+                current = []
+                current_size = 0
+            current.append(info)
+            current_size += estimated_size
+        if current:
+            groups.append(current)
+
+        part_paths: list[Path] = []
+        total_parts = len(groups)
+        for index, group in enumerate(groups, start=1):
+            part_path = parts_dir / f"{file_path.stem}.part{index:02d}-of-{total_parts:02d}.zip"
+            with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as target:
+                for info in group:
+                    target.writestr(info, source.read(info.filename))
+            part_paths.append(part_path)
+    return part_paths
+
+
+def upload_artifacts(user_id: str, cloud_task_id: str, file_path: Path) -> list[str]:
+    artifact_paths = split_zip_archive(file_path, ARTIFACT_MAX_BYTES)
+    return [upload_single_artifact(user_id, cloud_task_id, path) for path in artifact_paths]
 
 
 def handle_task(task: dict[str, Any]) -> None:
@@ -195,15 +237,15 @@ def handle_task(task: dict[str, Any]) -> None:
     else:
         raise RuntimeError(f"Unsupported task kind: {kind}")
 
-    object_path = upload_artifact(user_id, task_id, artifact)
+    object_paths = upload_artifacts(user_id, task_id, artifact)
     update_cloud_task(
         task_id,
         {
             "status": "completed",
             "progress": 100,
-            "message": "任务完成，成果 ZIP 已上传",
+            "message": "任务完成，成果 ZIP 已上传" if len(object_paths) == 1 else f"任务完成，成果已拆成 {len(object_paths)} 个 ZIP 上传",
             "artifact_bucket": ARTIFACT_BUCKET,
-            "artifact_path": object_path,
+            "artifact_path": object_paths[0] if len(object_paths) == 1 else json.dumps(object_paths, ensure_ascii=False),
             "artifact_size_bytes": artifact.stat().st_size,
             "completed_at": utc_now(),
         },
@@ -238,4 +280,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
