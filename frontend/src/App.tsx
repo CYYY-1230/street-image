@@ -30,6 +30,7 @@ import { isSupabaseConfigured, supabase } from './supabaseClient'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? '' : 'http://127.0.0.1:8000')
 const DEFAULT_SEGMENTATION_SERVICE_URL = import.meta.env.VITE_DEFAULT_SEGMENTATION_SERVICE_URL ?? ''
+const LOCAL_BACKEND_ENABLED = API_BASE.trim().length > 0
 const PROJECT_DRAFT_KEY = 'streetscope.projectDraft.v1'
 
 type Boundary = {
@@ -524,6 +525,39 @@ function App() {
     segmentation_service_url: segmentationServiceUrl,
   })
 
+  const submitCloudTask = async (
+    kind: CloudTask['kind'],
+    payload: Record<string, unknown>,
+    message: string,
+    nextStep = 4,
+  ) => {
+    if (!supabase || !cloudUser) {
+      throw new Error('公网模式需要先登录云端账号，再由 NAS Worker 领取任务。')
+    }
+    const { data: project, error: projectError } = await supabase
+      .from('streetscope_projects')
+      .insert({
+        user_id: cloudUser.id,
+        name: projectName || '未命名项目',
+        config: projectConfig,
+      })
+      .select('id')
+      .single()
+    if (projectError) throw projectError
+    const { error: taskError } = await supabase.from('streetscope_tasks').insert({
+      user_id: cloudUser.id,
+      project_id: project.id,
+      kind,
+      status: 'queued',
+      payload,
+      message,
+    })
+    if (taskError) throw taskError
+    setCloudAuthMessage('云端任务已提交。NAS Worker 会自动领取、执行并上传结果。')
+    setActiveStep(nextStep)
+    await refreshCloudTasks()
+  }
+
   const refreshCloudTasks = async () => {
     if (!supabase || !cloudUser) return
     const { data, error: cloudError } = await supabase
@@ -580,6 +614,7 @@ function App() {
   }
 
   const refreshOverview = async () => {
+    if (!LOCAL_BACKEND_ENABLED) return
     try {
       const [taskResult, projectResult] = await Promise.all([
         api<{ tasks: TaskSummary[] }>('/api/tasks'),
@@ -736,6 +771,21 @@ function App() {
   const startDownload = async () => {
     if (!sample?.points.length) return
     setError('')
+    if (!LOCAL_BACKEND_ENABLED) {
+      if (downloadProvider === 'baidu' && !ak.trim()) {
+        setError('官方 API Key 下载需要先填写百度 AK。')
+        return
+      }
+      setCloudSubmitting(true)
+      try {
+        await submitCloudTask('download', buildDownloadRequest(), '等待 NAS Worker 下载街景图像', 4)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '云端下载任务提交失败')
+      } finally {
+        setCloudSubmitting(false)
+      }
+      return
+    }
     try {
       const { task_id } = await api<{ task_id: string }>('/api/download-task', {
         method: 'POST',
@@ -780,6 +830,10 @@ function App() {
   const testBaiduKey = async () => {
     setError('')
     setKeyTestMessage('')
+    if (!LOCAL_BACKEND_ENABLED) {
+      setError('公网模式不直接测试百度 AK；请提交云端任务，由 NAS Worker 执行真实请求。')
+      return
+    }
     setTestingKey(true)
     try {
       const result = await api<{ ok: boolean; status_code: number; bytes: number; message: string }>('/api/baidu-test', {
@@ -805,6 +859,10 @@ function App() {
 
   const startMetrics = async () => {
     if (!sample?.points.length) return
+    if (!LOCAL_BACKEND_ENABLED) {
+      setError('公网模式不直接运行本地分割任务。请使用“提交云端完整任务”，由 NAS Worker 下载街景、调用模型服务并上传最终 ZIP。')
+      return
+    }
     if (!deployedModelNames.has(modelName)) {
       setError(`${modelName} 还没有在云端部署对应权重。请先检查模型服务 /health。`)
       return
@@ -872,31 +930,15 @@ function App() {
     setCloudSubmitting(true)
     setError('')
     try {
-      const { data: project, error: projectError } = await supabase
-        .from('streetscope_projects')
-        .insert({
-          user_id: cloudUser.id,
-          name: projectName || '未命名项目',
-          config: projectConfig,
-        })
-        .select('id')
-        .single()
-      if (projectError) throw projectError
-      const { error: taskError } = await supabase.from('streetscope_tasks').insert({
-        user_id: cloudUser.id,
-        project_id: project.id,
-        kind: 'download_then_metrics',
-        status: 'queued',
-        payload: {
+      await submitCloudTask(
+        'download_then_metrics',
+        {
           download_request: buildDownloadRequest(),
           metrics_request: buildMetricsRequest(),
         },
-        message: '等待 Windows Worker 领取任务',
-      })
-      if (taskError) throw taskError
-      setCloudAuthMessage('云端任务已提交。请在 Windows 打开 Worker，它会自动领取并上传结果。')
-      setActiveStep(4)
-      await refreshCloudTasks()
+        '等待 NAS Worker 执行完整生产任务',
+        4,
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : '云端任务提交失败')
     } finally {
@@ -918,6 +960,10 @@ function App() {
 
   const startUploadedImageMetrics = async (files: FileList | null) => {
     if (!files?.length) return
+    if (!LOCAL_BACKEND_ENABLED) {
+      setError('公网模式暂不支持直接上传图片到 Vercel 分割；请在本地模式使用该功能，或提交云端完整任务。')
+      return
+    }
     if (!segmentationServiceUrl.trim()) {
       setError('上传图片真实分割需要先填写模型服务地址。')
       return
@@ -970,6 +1016,10 @@ function App() {
 
   const importBoundaryFile = async (file: File | null) => {
     if (!file) return
+    if (!LOCAL_BACKEND_ENABLED) {
+      setError('公网模式暂不支持导入边界文件；请先用地图绘制研究区，或在本地模式导入文件。')
+      return
+    }
     setError('')
     try {
       const formData = new FormData()
@@ -988,6 +1038,10 @@ function App() {
 
   const importSamplePointFile = async (file: File | null) => {
     if (!file) return
+    if (!LOCAL_BACKEND_ENABLED) {
+      setError('公网模式暂不支持导入采样点文件；请先加载 OSM 路网生成采样点，或在本地模式导入文件。')
+      return
+    }
     setError('')
     setSampling(true)
     try {
@@ -1018,6 +1072,10 @@ function App() {
 
   const importRoadGeoJson = async (file: File | null) => {
     if (!file) return
+    if (!LOCAL_BACKEND_ENABLED) {
+      setError('公网模式暂不支持导入路网文件；请先使用“加载 OSM 路网”，或在本地模式导入文件。')
+      return
+    }
     setError('')
     setSampling(true)
     try {
@@ -1548,8 +1606,9 @@ function App() {
           </div>
           <button type="button" className="secondary-action" onClick={startDownload} disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim())}>
             <Download size={18} aria-hidden="true" />
-            创建抓图任务
+            {LOCAL_BACKEND_ENABLED ? '创建抓图任务' : '提交云端下载任务'}
           </button>
+          {!LOCAL_BACKEND_ENABLED ? <p className="inline-note">公网模式会把下载任务提交到 Supabase，由 NAS Worker 执行并上传 ZIP。</p> : null}
         </section>
         ) : null}
 
