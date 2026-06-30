@@ -55,6 +55,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows_worker_start.ps1 -Sta
 
 `-StartLocalApp` 会顺手启动本地前后端。后续如果本地前后端已经开着，可以不加它。
 
+更推荐的公网协作启动方式是：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows_cloud_start.ps1
+```
+
+这个脚本会启动 Windows 本地后端、启动 Worker，并打开公网网页 `https://street-image.vercel.app`。
+
+配置检查：
+
+```powershell
+python .\scripts\check_worker_env.py
+```
+
+它会检查 Supabase 表、Storage bucket 和本地后端连通性。
+
 ## 四、任务 payload 设计
 
 下载任务：
@@ -111,4 +127,3 @@ Worker 会自动：
 Mac 改代码 -> GitHub -> Vercel 自动更新网站
 Windows 双击 Worker -> 自动领取公网网页创建的任务 -> 生产数据 -> 上传结果
 ```
-

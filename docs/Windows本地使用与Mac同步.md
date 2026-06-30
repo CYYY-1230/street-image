@@ -48,6 +48,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows_start.ps1
 
 脚本会打开两个命令窗口，并自动打开浏览器。两个命令窗口不要关，关掉就等于停止系统。
 
+如果你使用公网网页 + Windows Worker 方案，推荐改用：
+
+```powershell
+cd D:\StreetScope
+powershell -ExecutionPolicy Bypass -File .\scripts\windows_cloud_start.ps1
+```
+
+它会打开公网网页，同时在 Windows 本机运行后端和 Worker。
+
 停止系统：
 
 ```powershell
@@ -91,4 +100,3 @@ http://127.0.0.1:5173/
 ```
 
 如果要让同一 Wi-Fi 下的其他电脑访问，需要把启动 host 改成 `0.0.0.0`，并配置前端 API 地址。这个属于下一步增强，当前先建议只在 Windows 本机使用，稳定性最高。
-

@@ -1,7 +1,8 @@
 param(
   [string]$HostName = "127.0.0.1",
   [int]$BackendPort = 8000,
-  [int]$FrontendPort = 5173
+  [int]$FrontendPort = 5173,
+  [string]$CorsOrigins = "http://localhost:5173,http://127.0.0.1:5173,https://street-image.vercel.app"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,7 +19,7 @@ if (-not (Test-Path "$Root\frontend\node_modules")) {
   exit 1
 }
 
-$backendCmd = "cd /d `"$Root\backend`" && `"$BackendPython`" -m uvicorn main:app --host $HostName --port $BackendPort"
+$backendCmd = "cd /d `"$Root\backend`" && set STREETSCOPE_CORS_ORIGINS=$CorsOrigins && `"$BackendPython`" -m uvicorn main:app --host $HostName --port $BackendPort"
 $frontendCmd = "cd /d `"$Root\frontend`" && npm run dev -- --host $HostName --port $FrontendPort"
 
 Write-Host "启动 StreetScope 后端：http://$HostName`:$BackendPort" -ForegroundColor Cyan
@@ -34,4 +35,3 @@ Start-Process "http://$HostName`:$FrontendPort"
 
 Write-Host ""
 Write-Host "已启动。请保留弹出的两个命令窗口；关掉窗口就会停止服务。" -ForegroundColor Green
-
