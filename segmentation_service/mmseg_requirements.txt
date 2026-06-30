@@ -1,0 +1,16 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+--find-links https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
+torch==2.1.2+cu118
+torchvision==0.16.2+cu118
+mmcv==2.1.0
+mmengine==0.10.7
+mmsegmentation==1.2.2
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pillow==11.0.0
+numpy==1.26.4
+scipy==1.14.1
+opencv-python-headless
+ftfy
+regex

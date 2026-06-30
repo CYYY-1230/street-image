@@ -1,0 +1,13 @@
+{
+  "name": "streetscope-root",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "npm --prefix frontend run build",
+    "install:frontend": "npm --prefix frontend install"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+
