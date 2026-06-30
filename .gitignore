@@ -22,3 +22,7 @@ SVC 街景爬取视频教程/
 
 # Vercel local metadata
 .vercel/
+
+# Local agent skills installed for this machine.
+.agents/
+skills-lock.json
