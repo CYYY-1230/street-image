@@ -181,6 +181,32 @@ function artifactPaths(task: CloudTask): string[] {
   }
 }
 
+function readableCloudTaskKind(kind: CloudTask['kind']) {
+  if (kind === 'download_then_metrics') return '完整生产任务'
+  if (kind === 'download') return '街景下载'
+  if (kind === 'metrics') return '语义分割'
+  return '上传图片分割'
+}
+
+function readableCloudError(task: CloudTask) {
+  const raw = `${task.message || ''} ${task.error || ''}`.trim()
+  if (!raw) return '等待更新'
+  if (task.status !== 'failed') return task.message || task.error || '等待更新'
+  if (raw.includes('Payload too large') || raw.includes('413')) {
+    return '结果 ZIP 太大，旧版 Worker 上传失败；请更新 NAS Worker 后重试'
+  }
+  if (raw.includes('/health') || raw.includes('模型服务不可用')) {
+    return '模型服务不可用，请确认 GPU 服务已开机且 /health 可访问'
+  }
+  if (raw.includes('RemoteDisconnected') || raw.includes('Connection aborted')) {
+    return '网络连接中断，请稍后重试；已下载内容会复用'
+  }
+  if (raw.includes('没有找到可用于真实分割的图片')) {
+    return '没有可用于分割的街景图像，请先完成街景下载'
+  }
+  return task.error || task.message || 'Worker 执行失败'
+}
+
 const adminPresets: Record<string, Boundary> = {
   徐汇示范区: { north: 31.2006, south: 31.1906, east: 121.4485, west: 121.4355 },
   上海徐汇区: { north: 31.2208, south: 31.1392, east: 121.4976, west: 121.3972 },
@@ -1862,8 +1888,8 @@ function App() {
               {cloudTasks.slice(0, 5).map((task) => (
                 <div className="compact-row" key={task.id}>
                   <div>
-                    <strong>{task.kind === 'download_then_metrics' ? '完整生产任务' : task.kind}</strong>
-                    <span>{task.status} · {task.progress}% · {task.message || task.error || '等待更新'}</span>
+                    <strong>{readableCloudTaskKind(task.kind)}</strong>
+                    <span className={task.status === 'failed' ? 'task-error-text' : ''}>{task.status} · {task.progress}% · {readableCloudError(task)}</span>
                   </div>
                   <div className="cloud-task-actions">
                     {task.status === 'queued' ? (

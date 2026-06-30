@@ -811,6 +811,10 @@ input[type="range"] {
   line-height: 1.45;
 }
 
+.compact-row .task-error-text {
+  color: #b42318;
+}
+
 .compact-list {
   display: flex;
   flex-direction: column;

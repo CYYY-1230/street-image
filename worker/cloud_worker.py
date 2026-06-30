@@ -205,6 +205,19 @@ def upload_artifacts(user_id: str, cloud_task_id: str, file_path: Path) -> list[
     return [upload_single_artifact(user_id, cloud_task_id, path) for path in artifact_paths]
 
 
+def readable_worker_error(exc: Exception) -> str:
+    text = str(exc)
+    if "Payload too large" in text or "413" in text:
+        return "结果 ZIP 超过单文件上传限制，Worker 会在新版中自动拆分上传；请更新 NAS Worker 后重试"
+    if "/health" in text or "模型服务不可用" in text:
+        return "模型服务不可用，请确认 GPU 服务已开机且 /health 可访问"
+    if "RemoteDisconnected" in text or "Connection aborted" in text:
+        return "网络连接中断，请稍后重试；已下载内容会复用"
+    if "Local task" in text and "status=failed" in text:
+        return text
+    return "Worker 执行失败"
+
+
 def handle_task(task: dict[str, Any]) -> None:
     task_id = str(task["id"])
     user_id = str(task["user_id"])
@@ -272,7 +285,7 @@ def main() -> None:
             task_id = locals().get("task", {}).get("id") if isinstance(locals().get("task"), dict) else None
             if task_id:
                 try:
-                    update_cloud_task(str(task_id), {"status": "failed", "error": str(exc), "message": "Worker 执行失败", "completed_at": utc_now()})
+                    update_cloud_task(str(task_id), {"status": "failed", "error": str(exc), "message": readable_worker_error(exc), "completed_at": utc_now()})
                 except Exception as update_exc:
                     print(f"Failed to update failed task status: {update_exc}", file=sys.stderr)
             time.sleep(POLL_SECONDS)
