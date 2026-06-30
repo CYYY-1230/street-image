@@ -219,6 +219,57 @@ button:disabled {
   margin-bottom: 14px;
 }
 
+.cloud-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  color: #334155;
+  background: #f8fafc;
+  border: 1px solid #dce4ec;
+  border-radius: 8px;
+}
+
+.compact-cloud-card {
+  margin: 12px 0 14px;
+}
+
+.cloud-card-title,
+.cloud-user-line,
+.cloud-auth-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cloud-card-title {
+  color: #0f766e;
+}
+
+.cloud-user-line {
+  min-width: 0;
+  font-size: 13px;
+}
+
+.cloud-user-line span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cloud-card input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  color: #14213d;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+}
+
+.cloud-auth-actions .mini-action {
+  flex: 1;
+}
+
 .home-section-title h3 {
   font-size: 16px;
 }

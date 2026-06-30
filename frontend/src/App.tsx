@@ -6,6 +6,7 @@ import {
   Activity,
   Archive,
   CheckCircle2,
+  Cloud,
   Download,
   FileDown,
   FileUp,
@@ -15,14 +16,17 @@ import {
   KeyRound,
   Layers,
   Loader2,
+  LogOut,
   MapPinned,
   Plus,
   Route,
   Settings2,
   Sparkles,
+  UserRound,
 } from 'lucide-react'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
+import { isSupabaseConfigured, supabase } from './supabaseClient'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
 const DEFAULT_SEGMENTATION_SERVICE_URL = import.meta.env.VITE_DEFAULT_SEGMENTATION_SERVICE_URL ?? ''
@@ -107,6 +111,23 @@ type ProjectSummary = {
   latest_task_id: string
   latest_created_at: string
   latest_export_url: string
+}
+
+type CloudTask = {
+  id: string
+  kind: 'download' | 'metrics' | 'download_then_metrics' | 'uploaded_metrics'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled'
+  progress: number
+  total: number
+  succeeded: number
+  failed: number
+  message: string
+  artifact_bucket?: string | null
+  artifact_path?: string | null
+  artifact_size_bytes?: number | null
+  error?: string | null
+  created_at: string
+  updated_at: string
 }
 
 type ProjectConfig = {
@@ -404,6 +425,14 @@ function App() {
   const [draftReady, setDraftReady] = useState(false)
   const [recentTasks, setRecentTasks] = useState<TaskSummary[]>([])
   const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([])
+  const [cloudUser, setCloudUser] = useState<{ id: string; email?: string } | null>(null)
+  const [cloudEmail, setCloudEmail] = useState('')
+  const [cloudPassword, setCloudPassword] = useState('')
+  const [cloudAuthMessage, setCloudAuthMessage] = useState('')
+  const [cloudTasks, setCloudTasks] = useState<CloudTask[]>([])
+  const [cloudSubmitting, setCloudSubmitting] = useState(false)
+
+  const cloudReady = isSupabaseConfigured && Boolean(supabase) && Boolean(cloudUser)
 
   const mapCenter: LatLngExpression = useMemo(
     () => [(boundary.north + boundary.south) / 2, (boundary.east + boundary.west) / 2],
@@ -461,6 +490,94 @@ function App() {
     }),
     [boundary, boundaryVisible, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
   )
+
+  const buildDownloadRequest = () => ({
+    project_name: projectName,
+    ak,
+    use_real_baidu: downloadProvider === 'baidu',
+    provider: downloadProvider,
+    points: sample?.points ?? [],
+    boundary,
+    roads: sample?.roads ?? [],
+    headings,
+    image_mode: imageMode,
+    skip_existing: skipExisting,
+    concurrency,
+    retry_count: retryCount,
+    width: imageWidth,
+    height: imageHeight,
+    pitch,
+    fov,
+    coordtype: 'bd09ll',
+  })
+
+  const buildMetricsRequest = () => ({
+    project_name: projectName,
+    points: sample?.points ?? [],
+    boundary,
+    roads: sample?.roads ?? [],
+    headings,
+    source_download_task_id: '',
+    model_name: modelName,
+    selected_metrics: selectedMetrics,
+    inference_mode: inferenceMode,
+    segmentation_service_url: segmentationServiceUrl,
+  })
+
+  const refreshCloudTasks = async () => {
+    if (!supabase || !cloudUser) return
+    const { data, error: cloudError } = await supabase
+      .from('streetscope_tasks')
+      .select('id, kind, status, progress, total, succeeded, failed, message, artifact_bucket, artifact_path, artifact_size_bytes, error, created_at, updated_at')
+      .order('created_at', { ascending: false })
+      .limit(20)
+    if (cloudError) {
+      setCloudAuthMessage(cloudError.message)
+      return
+    }
+    setCloudTasks((data ?? []) as CloudTask[])
+  }
+
+  const signInCloud = async () => {
+    if (!supabase) {
+      setCloudAuthMessage('当前未配置 Supabase 环境变量。')
+      return
+    }
+    if (!cloudEmail.trim() || !cloudPassword.trim()) {
+      setCloudAuthMessage('请填写邮箱和密码。')
+      return
+    }
+    setCloudAuthMessage('')
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: cloudEmail.trim(),
+      password: cloudPassword,
+    })
+    if (signInError) setCloudAuthMessage(signInError.message)
+  }
+
+  const signUpCloud = async () => {
+    if (!supabase) {
+      setCloudAuthMessage('当前未配置 Supabase 环境变量。')
+      return
+    }
+    if (!cloudEmail.trim() || !cloudPassword.trim()) {
+      setCloudAuthMessage('请填写邮箱和密码。')
+      return
+    }
+    setCloudAuthMessage('')
+    const { error: signUpError } = await supabase.auth.signUp({
+      email: cloudEmail.trim(),
+      password: cloudPassword,
+    })
+    setCloudAuthMessage(signUpError ? signUpError.message : '注册请求已提交；如果 Supabase 开启邮箱验证，请先完成邮箱确认。')
+  }
+
+  const signOutCloud = async () => {
+    if (!supabase) return
+    await supabase.auth.signOut()
+    setCloudUser(null)
+    setCloudTasks([])
+  }
 
   const refreshOverview = async () => {
     try {
@@ -534,6 +651,34 @@ function App() {
   useEffect(() => {
     refreshOverview()
   }, [])
+
+  useEffect(() => {
+    if (!supabase) return undefined
+    let alive = true
+    supabase.auth.getSession().then(({ data }) => {
+      if (!alive) return
+      const user = data.session?.user
+      setCloudUser(user ? { id: user.id, email: user.email ?? undefined } : null)
+      if (user?.email) setCloudEmail(user.email)
+    })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user
+      setCloudUser(user ? { id: user.id, email: user.email ?? undefined } : null)
+      if (user?.email) setCloudEmail(user.email)
+    })
+    return () => {
+      alive = false
+      listener.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!cloudUser) return undefined
+    refreshCloudTasks()
+    const timer = window.setInterval(refreshCloudTasks, 3000)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloudUser?.id])
 
   useEffect(() => {
     const taskId = downloadTask?.task_id
@@ -705,6 +850,70 @@ function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : '指标任务创建失败')
     }
+  }
+
+  const submitCloudFullTask = async () => {
+    if (!supabase || !cloudUser) {
+      setError('请先登录 Supabase 云端账号。')
+      return
+    }
+    if (!sample?.points.length) {
+      setError('请先生成采样点。')
+      return
+    }
+    if (downloadProvider === 'baidu' && !ak.trim()) {
+      setError('官方 API Key 下载需要先填写百度 AK。')
+      return
+    }
+    if (!segmentationServiceUrl.trim()) {
+      setError('云端完整任务需要填写模型服务地址。')
+      return
+    }
+    setCloudSubmitting(true)
+    setError('')
+    try {
+      const { data: project, error: projectError } = await supabase
+        .from('streetscope_projects')
+        .insert({
+          user_id: cloudUser.id,
+          name: projectName || '未命名项目',
+          config: projectConfig,
+        })
+        .select('id')
+        .single()
+      if (projectError) throw projectError
+      const { error: taskError } = await supabase.from('streetscope_tasks').insert({
+        user_id: cloudUser.id,
+        project_id: project.id,
+        kind: 'download_then_metrics',
+        status: 'queued',
+        payload: {
+          download_request: buildDownloadRequest(),
+          metrics_request: buildMetricsRequest(),
+        },
+        message: '等待 Windows Worker 领取任务',
+      })
+      if (taskError) throw taskError
+      setCloudAuthMessage('云端任务已提交。请在 Windows 打开 Worker，它会自动领取并上传结果。')
+      setActiveStep(4)
+      await refreshCloudTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '云端任务提交失败')
+    } finally {
+      setCloudSubmitting(false)
+    }
+  }
+
+  const downloadCloudArtifact = async (task: CloudTask) => {
+    if (!supabase || !task.artifact_path) return
+    const { data, error: signError } = await supabase.storage
+      .from(task.artifact_bucket || 'streetscope-artifacts')
+      .createSignedUrl(task.artifact_path, 60 * 10)
+    if (signError) {
+      setError(signError.message)
+      return
+    }
+    window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
   }
 
   const startUploadedImageMetrics = async (files: FileList | null) => {
@@ -962,6 +1171,18 @@ function App() {
               <input type="file" accept=".json,application/json" onChange={(event) => importProjectConfig(event.target.files?.[0] ?? null)} />
             </label>
           </nav>
+          <CloudAccountCard
+            cloudUser={cloudUser}
+            cloudEmail={cloudEmail}
+            cloudPassword={cloudPassword}
+            cloudAuthMessage={cloudAuthMessage}
+            configured={isSupabaseConfigured}
+            onEmailChange={setCloudEmail}
+            onPasswordChange={setCloudPassword}
+            onSignIn={signInCloud}
+            onSignUp={signUpCloud}
+            onSignOut={signOutCloud}
+          />
         </section>
 
         <section className="home-main">
@@ -1055,6 +1276,19 @@ function App() {
           </label>
         </div>
         <p className="draft-status">{draftStatus}，API Key 不会写入项目文件。</p>
+        <CloudAccountCard
+          cloudUser={cloudUser}
+          cloudEmail={cloudEmail}
+          cloudPassword={cloudPassword}
+          cloudAuthMessage={cloudAuthMessage}
+          configured={isSupabaseConfigured}
+          compact
+          onEmailChange={setCloudEmail}
+          onPasswordChange={setCloudPassword}
+          onSignIn={signInCloud}
+          onSignUp={signUpCloud}
+          onSignOut={signOutCloud}
+        />
 
         <section className="step-guide" aria-label="当前步骤">
           <div>
@@ -1378,6 +1612,16 @@ function App() {
             <Activity size={18} aria-hidden="true" />
             用已下载图片计算指标
           </button>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={submitCloudFullTask}
+            disabled={!cloudReady || cloudSubmitting || !sample?.points.length || !selectedMetrics.length || !segmentationServiceUrl.trim() || !selectedModelDeployed || (downloadProvider === 'baidu' && !ak.trim())}
+          >
+            {cloudSubmitting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Cloud size={18} aria-hidden="true" />}
+            提交云端完整任务
+          </button>
+          <p className="inline-note">公网使用推荐点“提交云端完整任务”：任务会进入 Supabase 队列，Windows Worker 负责下载、分割并上传最终 ZIP。</p>
           <label className="file-action">
             <FileUp size={16} aria-hidden="true" />
             上传图片/ZIP 分割
@@ -1488,7 +1732,7 @@ function App() {
           <div className="surface">
             <div className="surface-title">
               <Activity size={18} aria-hidden="true" />
-              <h3>近期任务</h3>
+              <h3>本地近期任务</h3>
             </div>
             <div className="compact-list">
               {recentTasks.slice(0, 4).map((task) => (
@@ -1501,6 +1745,35 @@ function App() {
                 </div>
               ))}
               {!recentTasks.length ? <p className="muted">任务创建后会显示在这里。</p> : null}
+            </div>
+          </div>
+
+          <div className="surface">
+            <div className="surface-title">
+              <Cloud size={18} aria-hidden="true" />
+              <h3>云端任务</h3>
+              <button type="button" className="mini-action" onClick={refreshCloudTasks} disabled={!cloudReady}>
+                刷新
+              </button>
+            </div>
+            <div className="compact-list">
+              {cloudTasks.slice(0, 5).map((task) => (
+                <div className="compact-row" key={task.id}>
+                  <div>
+                    <strong>{task.kind === 'download_then_metrics' ? '完整生产任务' : task.kind}</strong>
+                    <span>{task.status} · {task.progress}% · {task.message || task.error || '等待更新'}</span>
+                  </div>
+                  {task.artifact_path ? (
+                    <button type="button" className="mini-action" onClick={() => downloadCloudArtifact(task)}>
+                      ZIP
+                    </button>
+                  ) : (
+                    <em>{task.succeeded}/{task.total || '-'}</em>
+                  )}
+                </div>
+              ))}
+              {!cloudReady ? <p className="muted">登录云端账号后显示 Supabase 队列任务。</p> : null}
+              {cloudReady && !cloudTasks.length ? <p className="muted">暂无云端任务。</p> : null}
             </div>
           </div>
         </section>
@@ -1924,6 +2197,69 @@ function TaskPanel({
         <p className="muted">等待创建任务。</p>
       )}
     </div>
+  )
+}
+
+function CloudAccountCard({
+  cloudUser,
+  cloudEmail,
+  cloudPassword,
+  cloudAuthMessage,
+  configured,
+  compact = false,
+  onEmailChange,
+  onPasswordChange,
+  onSignIn,
+  onSignUp,
+  onSignOut,
+}: {
+  cloudUser: { id: string; email?: string } | null
+  cloudEmail: string
+  cloudPassword: string
+  cloudAuthMessage: string
+  configured: boolean
+  compact?: boolean
+  onEmailChange: (value: string) => void
+  onPasswordChange: (value: string) => void
+  onSignIn: () => void
+  onSignUp: () => void
+  onSignOut: () => void
+}) {
+  return (
+    <section className={compact ? 'cloud-card compact-cloud-card' : 'cloud-card'}>
+      <div className="cloud-card-title">
+        <Cloud size={17} aria-hidden="true" />
+        <strong>云端账号</strong>
+      </div>
+      {!configured ? (
+        <p className="inline-note">当前构建未配置 Supabase，公网登录和云端任务暂不可用。</p>
+      ) : cloudUser ? (
+        <>
+          <div className="cloud-user-line">
+            <UserRound size={16} aria-hidden="true" />
+            <span>{cloudUser.email || '已登录'}</span>
+          </div>
+          <button type="button" className="mini-action full" onClick={onSignOut}>
+            <LogOut size={15} aria-hidden="true" />
+            退出登录
+          </button>
+        </>
+      ) : (
+        <>
+          <input value={cloudEmail} onChange={(event) => onEmailChange(event.target.value)} placeholder="邮箱" />
+          <input value={cloudPassword} onChange={(event) => onPasswordChange(event.target.value)} placeholder="密码" type="password" />
+          <div className="cloud-auth-actions">
+            <button type="button" className="mini-action" onClick={onSignIn}>
+              登录
+            </button>
+            <button type="button" className="mini-action" onClick={onSignUp}>
+              注册
+            </button>
+          </div>
+        </>
+      )}
+      {cloudAuthMessage ? <p className="inline-note">{cloudAuthMessage}</p> : null}
+    </section>
   )
 }
 
