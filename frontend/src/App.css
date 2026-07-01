@@ -1051,6 +1051,58 @@ th {
   transition: width 180ms ease-out;
 }
 
+.download-dashboard {
+  margin-bottom: 16px;
+}
+
+.download-dashboard .surface {
+  border-color: #99f6e4;
+  background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 42%);
+}
+
+.download-progress-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.download-progress-hero span,
+.empty-progress span {
+  display: block;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.download-progress-hero strong,
+.empty-progress strong {
+  display: block;
+  margin-top: 4px;
+  color: #14213d;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.download-progress-hero b {
+  color: #0f766e;
+  font-size: 34px;
+  line-height: 1;
+}
+
+.progress-track.large {
+  height: 16px;
+  margin-top: 16px;
+}
+
+.empty-progress {
+  margin-top: 14px;
+  padding: 18px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+}
+
 .task-stats {
   justify-content: flex-start;
   flex-wrap: wrap;

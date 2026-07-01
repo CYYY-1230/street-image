@@ -1424,6 +1424,7 @@ function App() {
   )
   const cloudMetricsReady = Boolean(cloudDeliveryTask)
   const deliveryReady = Boolean(cloudDeliveryTask || (finishedMetrics && metricsTask))
+  const activeCloudStreetTask = currentCloudDownload ?? currentCloudRun
   const stepGuides = [
     {
       title: '1. 选择研究区',
@@ -2061,6 +2062,22 @@ function App() {
           <span>百度 API Key 仅用于当前请求，不写入项目 JSON；真实下载请确认调用额度、费用和地图平台数据使用条款。</span>
         </section>
 
+        {activeStep === 2 ? (
+          <section className="download-dashboard">
+            {useCloudQueue ? (
+              <CloudStreetTaskPanel task={activeCloudStreetTask} cloudReady={cloudReady} />
+            ) : (
+              <TaskPanel
+                title="下载进度与图像记录"
+                icon={<Image size={18} aria-hidden="true" />}
+                task={downloadTask}
+                onTaskChange={setDownloadTask}
+                request={api}
+              />
+            )}
+          </section>
+        ) : null}
+
         {activeStep === 4 ? (
         <section className="overview-grid" aria-label="项目中心">
           <div className="surface delivery-hero">
@@ -2172,7 +2189,7 @@ function App() {
         </section>
         ) : null}
 
-        {activeStep !== 4 ? (
+        {activeStep === 0 ? (
         <section className="map-band">
           <div className="map-wrap">
             <MapContainer center={mapCenter} zoom={12} scrollWheelZoom className="map">
@@ -2305,7 +2322,7 @@ function App() {
           </div>
           ) : null}
 
-          {(activeStep === 2 || activeStep === 4) ? (
+          {activeStep === 4 ? (
           <TaskPanel
             title="街景图像任务"
             icon={<Image size={18} aria-hidden="true" />}
@@ -2385,6 +2402,43 @@ function App() {
         ) : null}
       </section>
     </main>
+  )
+}
+
+function CloudStreetTaskPanel({ task, cloudReady }: { task: CloudTask | null; cloudReady: boolean }) {
+  const progress = Math.max(0, Math.min(100, task?.progress ?? 0))
+  return (
+    <div className="surface download-progress-surface">
+      <div className="surface-title">
+        <Cloud size={18} aria-hidden="true" />
+        <h3>云端下载进度</h3>
+      </div>
+      {task ? (
+        <>
+          <div className="download-progress-hero">
+            <div>
+              <span>{readableCloudTaskKind(task.kind)}</span>
+              <strong>{task.status === 'completed' ? '任务完成' : task.status === 'failed' ? '执行失败' : task.status === 'queued' ? '等待 NAS Worker' : 'NAS Worker 正在执行'}</strong>
+            </div>
+            <b>{progress}%</b>
+          </div>
+          <div className="progress-track large" aria-label="云端下载进度">
+            <span style={{ width: `${progress}%` }} />
+          </div>
+          <div className="task-stats">
+            <span>成功 {task.succeeded}</span>
+            <span>失败 {task.failed}</span>
+            <span>总数 {task.total || '计算中'}</span>
+            <span>{readableCloudError(task)}</span>
+          </div>
+        </>
+      ) : (
+        <div className="empty-progress">
+          <strong>{cloudReady ? '还没有下载任务' : '云端账号未连接'}</strong>
+          <span>{cloudReady ? '点击左侧“提交云端下载任务”后，这里会实时显示进度。' : '登录云端账号后，NAS Worker 任务会显示在这里。'}</span>
+        </div>
+      )}
+    </div>
   )
 }
 
