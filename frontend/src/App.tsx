@@ -1425,6 +1425,10 @@ function App() {
   const cloudMetricsReady = Boolean(cloudDeliveryTask)
   const deliveryReady = Boolean(cloudDeliveryTask || (finishedMetrics && metricsTask))
   const activeCloudStreetTask = currentCloudDownload ?? currentCloudRun
+  const activeCloudMetricsTask =
+    currentCloudRun ??
+    projectCloudTasks.find((task) => task.kind === 'metrics' || task.kind === 'uploaded_metrics') ??
+    cloudDeliveryTask
   const stepGuides = [
     {
       title: '1. 选择研究区',
@@ -2065,13 +2069,41 @@ function App() {
         {activeStep === 2 ? (
           <section className="download-dashboard">
             {useCloudQueue ? (
-              <CloudStreetTaskPanel task={activeCloudStreetTask} cloudReady={cloudReady} />
+              <CloudTaskProgressPanel
+                task={activeCloudStreetTask}
+                cloudReady={cloudReady}
+                title="云端下载进度"
+                emptyTitle="还没有下载任务"
+                emptyHint="点击左侧“提交云端下载任务”后，这里会实时显示进度。"
+              />
             ) : (
               <TaskPanel
                 title="下载进度与图像记录"
                 icon={<Image size={18} aria-hidden="true" />}
                 task={downloadTask}
                 onTaskChange={setDownloadTask}
+                request={api}
+              />
+            )}
+          </section>
+        ) : null}
+
+        {activeStep === 3 ? (
+          <section className="download-dashboard">
+            {useCloudQueue ? (
+              <CloudTaskProgressPanel
+                task={activeCloudMetricsTask}
+                cloudReady={cloudReady}
+                title="云端语义分割进度"
+                emptyTitle="还没有语义分割任务"
+                emptyHint="点击左侧“提交云端完整任务”后，这里会实时显示下载、分割和指标计算进度。"
+              />
+            ) : (
+              <TaskPanel
+                title="语义分割进度与指标记录"
+                icon={<Sparkles size={18} aria-hidden="true" />}
+                task={metricsTask}
+                onTaskChange={setMetricsTask}
                 request={api}
               />
             )}
@@ -2332,7 +2364,7 @@ function App() {
           />
           ) : null}
 
-          {(activeStep === 3 || activeStep === 4) ? (
+          {activeStep === 4 ? (
           <TaskPanel
             title="语义分割与指标"
             icon={<Sparkles size={18} aria-hidden="true" />}
@@ -2405,13 +2437,25 @@ function App() {
   )
 }
 
-function CloudStreetTaskPanel({ task, cloudReady }: { task: CloudTask | null; cloudReady: boolean }) {
+function CloudTaskProgressPanel({
+  task,
+  cloudReady,
+  title,
+  emptyTitle,
+  emptyHint,
+}: {
+  task: CloudTask | null
+  cloudReady: boolean
+  title: string
+  emptyTitle: string
+  emptyHint: string
+}) {
   const progress = Math.max(0, Math.min(100, task?.progress ?? 0))
   return (
     <div className="surface download-progress-surface">
       <div className="surface-title">
         <Cloud size={18} aria-hidden="true" />
-        <h3>云端下载进度</h3>
+        <h3>{title}</h3>
       </div>
       {task ? (
         <>
@@ -2434,8 +2478,8 @@ function CloudStreetTaskPanel({ task, cloudReady }: { task: CloudTask | null; cl
         </>
       ) : (
         <div className="empty-progress">
-          <strong>{cloudReady ? '还没有下载任务' : '云端账号未连接'}</strong>
-          <span>{cloudReady ? '点击左侧“提交云端下载任务”后，这里会实时显示进度。' : '登录云端账号后，NAS Worker 任务会显示在这里。'}</span>
+          <strong>{cloudReady ? emptyTitle : '云端账号未连接'}</strong>
+          <span>{cloudReady ? emptyHint : '登录云端账号后，NAS Worker 任务会显示在这里。'}</span>
         </div>
       )}
     </div>
