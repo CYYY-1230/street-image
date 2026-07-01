@@ -147,6 +147,7 @@ type ProjectConfig = {
   downloadProvider?: 'baidu' | 'baidu_web'
   boundaryVisible?: boolean
   imageMode?: 'directions' | 'stitched' | 'panorama' | 'both'
+  captureDate?: string
   skipExisting?: boolean
   concurrency?: number
   retryCount?: number
@@ -467,6 +468,7 @@ function App() {
   const [useRealBaidu, setUseRealBaidu] = useState(false)
   const [headings, setHeadings] = useState([0, 90, 180, 270])
   const [imageMode, setImageMode] = useState<'directions' | 'stitched' | 'panorama'>('directions')
+  const [captureDate, setCaptureDate] = useState('latest')
   const [skipExisting, setSkipExisting] = useState(true)
   const [concurrency, setConcurrency] = useState(2)
   const [retryCount, setRetryCount] = useState(1)
@@ -537,6 +539,11 @@ function App() {
       .slice(0, 260)
   }, [metricsTask?.records, sample])
 
+  const captureDateOptions = useMemo(() => {
+    const currentYear = new Date().getFullYear()
+    return ['latest', ...Array.from({ length: 12 }, (_, index) => String(currentYear - index))]
+  }, [])
+
   const projectConfig = useMemo<ProjectConfig>(
     () => ({
       version: 1,
@@ -554,6 +561,7 @@ function App() {
       useRealBaidu,
       downloadProvider,
       imageMode,
+      captureDate,
       skipExisting,
       concurrency,
       retryCount,
@@ -565,7 +573,7 @@ function App() {
       localApiBase: backendBase,
       sample,
     }),
-    [backendBase, boundary, boundaryVisible, cloudProjectId, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
+    [backendBase, boundary, boundaryVisible, captureDate, cloudProjectId, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
   )
 
   const buildDownloadRequest = () => ({
@@ -578,6 +586,7 @@ function App() {
     roads: sample?.roads ?? [],
     headings,
     image_mode: imageMode,
+    capture_date: captureDate,
     skip_existing: skipExisting,
     concurrency,
     retry_count: retryCount,
@@ -794,6 +803,7 @@ function App() {
     setUseRealBaidu(config.useRealBaidu)
     setDownloadProvider(config.downloadProvider === 'baidu' ? 'baidu' : 'baidu_web')
     setImageMode(config.imageMode === 'both' ? 'panorama' : (config.imageMode ?? 'directions'))
+    setCaptureDate(config.captureDate ?? 'latest')
     setSkipExisting(config.skipExisting ?? true)
     setConcurrency(config.concurrency ?? 2)
     setRetryCount(config.retryCount ?? 1)
@@ -956,25 +966,7 @@ function App() {
     try {
       const { task_id } = await api<{ task_id: string }>('/api/download-task', {
         method: 'POST',
-        body: JSON.stringify({
-          project_name: projectName,
-          ak,
-          use_real_baidu: downloadProvider === 'baidu',
-          provider: downloadProvider,
-          points: sample.points,
-          boundary,
-          roads: sample.roads,
-          headings,
-          image_mode: imageMode,
-          skip_existing: skipExisting,
-          concurrency,
-          retry_count: retryCount,
-          width: imageWidth,
-          height: imageHeight,
-          pitch,
-          fov,
-          coordtype: 'bd09ll',
-        }),
+        body: JSON.stringify(buildDownloadRequest()),
       })
       setDownloadTask({
         task_id,
@@ -1850,6 +1842,17 @@ function App() {
               <option value="panorama">全景图</option>
             </select>
           </label>
+          <label className="field">
+            <span>街景日期/年份</span>
+            <select value={captureDate} onChange={(event) => setCaptureDate(event.target.value)}>
+              {captureDateOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option === 'latest' ? '最新可用' : `${option} 年`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="inline-note">日期会参与缓存复用和输出记录；如果百度侧没有对应历史影像，任务会以平台实际返回为准。</p>
           <div className="coordinate-grid">
             <label className="mini-field">
               <span>宽度</span>
@@ -2335,7 +2338,7 @@ function App() {
                 </tr>
                 <tr>
                   <th>图像参数</th>
-                  <td>{imageWidth}×{imageHeight}，pitch {pitch}，fov {fov}，坐标自动转换，{imageMode === 'directions' ? '四方向图（不拼接）' : imageMode === 'stitched' ? '四方向图（拼接后计算）' : '全景图'}，方向 {imageMode === 'panorama' ? 'pano' : headings.join(' / ') || '未选择'}</td>
+                  <td>{imageWidth}×{imageHeight}，pitch {pitch}，fov {fov}，日期 {captureDate === 'latest' ? '最新可用' : `${captureDate} 年`}，坐标自动转换，{imageMode === 'directions' ? '四方向图（不拼接）' : imageMode === 'stitched' ? '四方向图（拼接后计算）' : '全景图'}，方向 {imageMode === 'panorama' ? 'pano' : headings.join(' / ') || '未选择'}</td>
                 </tr>
                 <tr>
                   <th>下载策略</th>

@@ -196,6 +196,7 @@ class DownloadRequest(BaseModel):
     fov: int = Field(default=90, ge=10, le=360)
     coordtype: Literal["bd09ll", "wgs84ll", "gcj02"] = "bd09ll"
     image_mode: Literal["directions", "stitched", "panorama"] = "directions"
+    capture_date: str = "latest"
     skip_existing: bool = True
     concurrency: int = Field(default=2, ge=1, le=8)
     retry_count: int = Field(default=1, ge=0, le=5)
@@ -1079,6 +1080,20 @@ def build_sample_points(req: SampleRequest) -> SampleResponse:
     raise HTTPException(status_code=410, detail="生产模式已禁用内置网格采样，请使用 OSM 路网、导入路网或导入已有采样点")
 
 
+def normalize_capture_date(value: object) -> str:
+    text = str(value or "latest").strip()
+    if not text or text.lower() in {"latest", "newest", "current", "最新", "最新可用"}:
+        return "latest"
+    if re.fullmatch(r"\d{4}(-\d{2}(-\d{2})?)?", text):
+        return text
+    return "latest"
+
+
+def capture_date_query(value: object) -> str:
+    capture_date = normalize_capture_date(value)
+    return "" if capture_date == "latest" else f"&date={quote(capture_date)}"
+
+
 def baidu_url(req: DownloadRequest, point: SamplePoint, heading: int) -> str:
     lng = point.lng_bd09 if req.coordtype == "bd09ll" else point.lng
     lat = point.lat_bd09 if req.coordtype == "bd09ll" else point.lat
@@ -1087,6 +1102,7 @@ def baidu_url(req: DownloadRequest, point: SamplePoint, heading: int) -> str:
         f"ak={req.ak}&width={req.width}&height={req.height}"
         f"&location={lng},{lat}&coordtype={req.coordtype}"
         f"&heading={heading}&pitch={req.pitch}&fov={req.fov}"
+        f"{capture_date_query(req.capture_date)}"
     )
 
 
@@ -1129,21 +1145,21 @@ def baidu_web_headers() -> Dict[str, str]:
     }
 
 
-def baidu_web_panoid_url(point: SamplePoint) -> str:
+def baidu_web_panoid_url(point: SamplePoint, capture_date: object = "latest") -> str:
     x, y = bd09_to_mercator(point.lng_bd09, point.lat_bd09)
-    return f"https://mapsv0.bdimg.com/?&qt=qsdata&x={x}&y={y}&l=17.031000000000002&action=0&mode=day&t={int(time.time() * 1000)}"
+    return f"https://mapsv0.bdimg.com/?&qt=qsdata&x={x}&y={y}&l=17.031000000000002&action=0&mode=day&t={int(time.time() * 1000)}{capture_date_query(capture_date)}"
 
 
-def baidu_web_image_url(panoid: str, heading: int, pitch: int, width: int, height: int) -> str:
-    return f"https://mapsv0.bdimg.com/?qt=pr3d&fovy=90&quality=100&panoid={panoid}&heading={heading}&pitch={pitch}&width={width}&height={height}"
+def baidu_web_image_url(panoid: str, heading: int, pitch: int, width: int, height: int, capture_date: object = "latest") -> str:
+    return f"https://mapsv0.bdimg.com/?qt=pr3d&fovy=90&quality=100&panoid={panoid}&heading={heading}&pitch={pitch}&width={width}&height={height}{capture_date_query(capture_date)}"
 
 
 BAIDU_WEB_NATIVE_PANORAMA_LEVEL = 4
 BAIDU_WEB_NATIVE_TILE_SIZE = 512
 
 
-def baidu_web_panorama_tile_url(panoid: str, x: int, y: int, level: int = BAIDU_WEB_NATIVE_PANORAMA_LEVEL) -> str:
-    return f"https://mapsv0.bdimg.com/?qt=pdata&sid={panoid}&pos={y}_{x}&z={level}&from=PC"
+def baidu_web_panorama_tile_url(panoid: str, x: int, y: int, level: int = BAIDU_WEB_NATIVE_PANORAMA_LEVEL, capture_date: object = "latest") -> str:
+    return f"https://mapsv0.bdimg.com/?qt=pdata&sid={panoid}&pos={y}_{x}&z={level}&from=PC{capture_date_query(capture_date)}"
 
 
 def baidu_web_panorama_grid(level: int = BAIDU_WEB_NATIVE_PANORAMA_LEVEL) -> tuple[int, int]:
@@ -1155,16 +1171,16 @@ def baidu_web_panorama_grid(level: int = BAIDU_WEB_NATIVE_PANORAMA_LEVEL) -> tup
     return 2 * rows, rows
 
 
-def download_baidu_web_native_panorama(panoid: str, output_path: Path, level: int = BAIDU_WEB_NATIVE_PANORAMA_LEVEL) -> tuple[str, int, int, str]:
+def download_baidu_web_native_panorama(panoid: str, output_path: Path, level: int = BAIDU_WEB_NATIVE_PANORAMA_LEVEL, capture_date: object = "latest") -> tuple[str, int, int, str]:
     cols, rows = baidu_web_panorama_grid(level)
     panorama = Image.new("RGB", (cols * BAIDU_WEB_NATIVE_TILE_SIZE, rows * BAIDU_WEB_NATIVE_TILE_SIZE))
     total_bytes = 0
     http_status = 200
-    first_url = baidu_web_panorama_tile_url(panoid, 0, 0, level)
+    first_url = baidu_web_panorama_tile_url(panoid, 0, 0, level, capture_date)
     headers = baidu_web_headers()
     for y in range(rows):
         for x in range(cols):
-            url = baidu_web_panorama_tile_url(panoid, x, y, level)
+            url = baidu_web_panorama_tile_url(panoid, x, y, level, capture_date)
             response = requests.get(url, headers=headers, timeout=20)
             http_status = response.status_code
             total_bytes += len(response.content)
@@ -1179,8 +1195,8 @@ def download_baidu_web_native_panorama(panoid: str, output_path: Path, level: in
     return first_url, http_status, total_bytes, f"image/jpeg; native-pdata-level={level}; tiles={cols}x{rows}; projection=equirectangular"
 
 
-def baidu_web_get_panoid(point: SamplePoint) -> tuple[Optional[str], str]:
-    url = baidu_web_panoid_url(point)
+def baidu_web_get_panoid(point: SamplePoint, capture_date: object = "latest") -> tuple[Optional[str], str]:
+    url = baidu_web_panoid_url(point, capture_date)
     response = requests.get(url, headers=baidu_web_headers(), timeout=12)
     response.raise_for_status()
     text = response.content.decode("utf-8", errors="ignore")
@@ -1610,6 +1626,7 @@ def download_request_from_task(task: TaskState, ak: Optional[str] = None) -> Dow
         fov=int(params.get("fov", 90) or 90),
         coordtype=params.get("coordtype", "bd09ll"),
         image_mode=params.get("image_mode", "directions"),
+        capture_date=normalize_capture_date(params.get("capture_date", "latest")),
         skip_existing=bool(params.get("skip_existing", True)),
         concurrency=int(params.get("concurrency", 2) or 2),
         retry_count=int(params.get("retry_count", 1) or 1),
@@ -1636,13 +1653,15 @@ def image_archive_key(req: DownloadRequest, point: SamplePoint, heading: int, im
         "pitch": req.pitch,
         "fov": 360 if image_type == "panorama" else req.fov,
         "coordtype": req.coordtype,
+        "capture_date": normalize_capture_date(req.capture_date),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def download_one_image(req: DownloadRequest, point: SamplePoint, heading: int, image_type: str, label: str, project_dir: Path) -> Dict[str, object]:
-    capture_date = datetime.utcnow().strftime("%Y%m%d")
+    capture_date = normalize_capture_date(req.capture_date)
+    capture_date_label = capture_date if capture_date != "latest" else "latest"
     archive_key = image_archive_key(req, point, heading, image_type, label)
     file_name = "_".join(
         [
@@ -1652,7 +1671,7 @@ def download_one_image(req: DownloadRequest, point: SamplePoint, heading: int, i
             f"{point.lng:.7f}",
             f"{point.lat:.7f}",
             safe_file_part(label),
-            capture_date,
+            safe_file_part(capture_date_label),
         ]
     ) + ".jpg"
     file_path = project_dir / file_name
@@ -1714,19 +1733,19 @@ def download_one_image(req: DownloadRequest, point: SamplePoint, heading: int, i
             attempts = attempt
             try:
                 if not panoid:
-                    found_panoid, panoid_url = baidu_web_get_panoid(point)
+                    found_panoid, panoid_url = baidu_web_get_panoid(point, capture_date)
                     panoid = found_panoid or ""
                 if not panoid:
                     ok = False
                     error = "未查询到 panoid，当前点可能没有百度街景"
                     break
                 if image_type == "panorama":
-                    raw_url, http_status, response_bytes, content_type = download_baidu_web_native_panorama(panoid, file_path)
+                    raw_url, http_status, response_bytes, content_type = download_baidu_web_native_panorama(panoid, file_path, capture_date=capture_date)
                     request_url = raw_url
                     ok = True
                     error = ""
                     break
-                raw_url = baidu_web_image_url(panoid, heading, req.pitch, req.width, req.height)
+                raw_url = baidu_web_image_url(panoid, heading, req.pitch, req.width, req.height, capture_date)
                 request_url = raw_url
                 response = requests.get(raw_url, headers=baidu_web_headers(), timeout=12)
                 http_status = response.status_code
@@ -1766,6 +1785,8 @@ def download_one_image(req: DownloadRequest, point: SamplePoint, heading: int, i
         "road_name": point.road_name,
         "admin_name": point.admin_name,
         "provider": req.provider,
+        "capture_date": capture_date,
+        "capture_date_label": capture_date_label,
         "request_url": request_url,
         "panoid": panoid if req.provider == "baidu_web" else "",
         "panoid_url": panoid_url if req.provider == "baidu_web" else "",
@@ -2466,6 +2487,7 @@ def create_download_task(req: DownloadRequest, request: Request) -> Dict[str, st
                 "fov": req.fov,
                 "coordtype": req.coordtype,
                 "image_mode": req.image_mode,
+                "capture_date": normalize_capture_date(req.capture_date),
                 "skip_existing": req.skip_existing,
                 "concurrency": req.concurrency,
                 "retry_count": req.retry_count,
