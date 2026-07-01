@@ -1203,6 +1203,51 @@ th {
   border-color: #99f6e4;
 }
 
+.service-card {
+  gap: 12px;
+}
+
+.compact-field {
+  margin: 0;
+}
+
+.service-status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.service-status-row em {
+  font-style: normal;
+}
+
+.service-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+
+.service-dot.ok {
+  background: #0f766e;
+  box-shadow: 0 0 0 4px #ccfbf1;
+}
+
+.service-dot.failed {
+  background: #dc2626;
+  box-shadow: 0 0 0 4px #fee2e2;
+}
+
+.service-dot.checking {
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px #fef3c7;
+}
+
 .spin {
   animation: spin 0.8s linear infinite;
 }

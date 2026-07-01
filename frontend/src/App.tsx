@@ -28,10 +28,11 @@ import 'leaflet/dist/leaflet.css'
 import './App.css'
 import { isSupabaseConfigured, supabase } from './supabaseClient'
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? '' : 'http://127.0.0.1:8000')
+const DEFAULT_API_BASE =
+  import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? 'http://192.168.31.56:8000' : 'http://127.0.0.1:8000')
 const DEFAULT_SEGMENTATION_SERVICE_URL = import.meta.env.VITE_DEFAULT_SEGMENTATION_SERVICE_URL ?? ''
-const LOCAL_BACKEND_ENABLED = API_BASE.trim().length > 0
 const PROJECT_DRAFT_KEY = 'streetscope.projectDraft.v1'
+const LOCAL_API_BASE_KEY = 'streetscope.localApiBase.v1'
 
 type Boundary = {
   north: number
@@ -153,6 +154,7 @@ type ProjectConfig = {
   inferenceMode?: 'external'
   segmentationServiceUrl?: string
   cloudProjectId?: string | null
+  localApiBase?: string
   sample: SampleResponse | null
 }
 
@@ -398,8 +400,22 @@ function gviColor(gvi: number) {
   return '#dc2626'
 }
 
-async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+function normalizeApiBase(value: string) {
+  return value.trim().replace(/\/+$/, '')
+}
+
+function readableApiError(err: unknown, fallback: string) {
+  if (err instanceof TypeError && err.message === 'Failed to fetch') {
+    return `${fallback}：无法连接本地/NAS 数据服务。请确认 NAS 容器正在运行，服务地址可访问，并且当前电脑和 NAS 在同一网络。`
+  }
+  if (err instanceof Error) return err.message
+  return fallback
+}
+
+async function apiRequest<T>(apiBase: string, path: string, options?: RequestInit): Promise<T> {
+  const base = normalizeApiBase(apiBase)
+  if (!base) throw new Error('请先配置本地/NAS 数据服务地址')
+  const response = await fetch(`${base}${path}`, {
     headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) },
     ...options,
   })
@@ -410,8 +426,10 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-async function uploadApi<T>(path: string, formData: FormData): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+async function uploadRequest<T>(apiBase: string, path: string, formData: FormData): Promise<T> {
+  const base = normalizeApiBase(apiBase)
+  if (!base) throw new Error('请先配置本地/NAS 数据服务地址')
+  const response = await fetch(`${base}${path}`, {
     method: 'POST',
     body: formData,
   })
@@ -469,9 +487,17 @@ function App() {
   const [cloudTasks, setCloudTasks] = useState<CloudTask[]>([])
   const [cloudProjectId, setCloudProjectId] = useState<string | null>(null)
   const [cloudSubmitting, setCloudSubmitting] = useState(false)
+  const [localApiBase, setLocalApiBase] = useState(() => window.localStorage.getItem(LOCAL_API_BASE_KEY) ?? DEFAULT_API_BASE)
+  const [localApiStatus, setLocalApiStatus] = useState<'unknown' | 'checking' | 'ok' | 'failed'>('unknown')
+  const [localApiMessage, setLocalApiMessage] = useState('')
   const cloudSubmitLock = useRef(false)
 
   const cloudReady = isSupabaseConfigured && Boolean(supabase) && Boolean(cloudUser)
+  const backendBase = normalizeApiBase(localApiBase)
+  const localBackendEnabled = backendBase.length > 0
+  const useCloudQueue = import.meta.env.PROD && cloudReady
+  const api = <T,>(path: string, options?: RequestInit) => apiRequest<T>(backendBase, path, options)
+  const uploadApi = <T,>(path: string, formData: FormData) => uploadRequest<T>(backendBase, path, formData)
 
   const mapCenter: LatLngExpression = useMemo(
     () => [(boundary.north + boundary.south) / 2, (boundary.east + boundary.west) / 2],
@@ -526,9 +552,10 @@ function App() {
       inferenceMode,
       segmentationServiceUrl,
       cloudProjectId,
+      localApiBase: backendBase,
       sample,
     }),
-    [boundary, boundaryVisible, cloudProjectId, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
+    [backendBase, boundary, boundaryVisible, cloudProjectId, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
   )
 
   const buildDownloadRequest = () => ({
@@ -706,8 +733,31 @@ function App() {
     setCloudProjectId(null)
   }
 
+  const checkLocalApi = async (silent = false) => {
+    if (!backendBase) {
+      setLocalApiStatus('failed')
+      setLocalApiMessage('未配置本地/NAS 数据服务地址')
+      return false
+    }
+    if (!silent) {
+      setLocalApiStatus('checking')
+      setLocalApiMessage('正在检测 NAS 数据服务...')
+    }
+    try {
+      const health = await api<{ status: string }>('/api/health')
+      const ok = health.status === 'ok'
+      setLocalApiStatus(ok ? 'ok' : 'failed')
+      setLocalApiMessage(ok ? 'NAS 数据服务已连接' : 'NAS 数据服务返回异常')
+      return ok
+    } catch (err) {
+      setLocalApiStatus('failed')
+      setLocalApiMessage(readableApiError(err, 'NAS 数据服务检测失败'))
+      return false
+    }
+  }
+
   const refreshOverview = async () => {
-    if (!LOCAL_BACKEND_ENABLED) return
+    if (!localBackendEnabled) return
     try {
       const projectResult = await api<{ projects: ProjectSummary[] }>('/api/projects')
       setRecentProjects(projectResult.projects)
@@ -740,6 +790,7 @@ function App() {
     setModelName(config.modelName)
     setSelectedMetrics(config.selectedMetrics?.length ? config.selectedMetrics : defaultSelectedMetrics)
     setSegmentationServiceUrl(config.segmentationServiceUrl ?? DEFAULT_SEGMENTATION_SERVICE_URL)
+    if (config.localApiBase) setLocalApiBase(config.localApiBase)
     setSample(config.sample)
     setCloudProjectId(config.cloudProjectId ?? null)
     setDownloadTask(null)
@@ -767,11 +818,18 @@ function App() {
     if (!draftReady) return
     try {
       window.localStorage.setItem(PROJECT_DRAFT_KEY, JSON.stringify(projectConfig))
+      window.localStorage.setItem(LOCAL_API_BASE_KEY, backendBase)
       setDraftStatus('已自动保存')
     } catch {
       setDraftStatus('自动保存失败')
     }
   }, [draftReady, projectConfig])
+
+  useEffect(() => {
+    if (!draftReady || !backendBase) return
+    checkLocalApi(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftReady, backendBase])
 
   useEffect(() => {
     refreshOverview()
@@ -813,10 +871,14 @@ function App() {
     const status = downloadTask?.status
     if (!taskId || (status !== 'running' && status !== 'queued')) return
     const timer = window.setInterval(async () => {
-      const next = await api<TaskState>(`/api/tasks/${taskId}`)
-      setDownloadTask(next)
-      refreshOverview()
-      if (next.status === 'completed' || next.status === 'failed' || next.status === 'canceled' || next.status === 'paused') window.clearInterval(timer)
+      try {
+        const next = await api<TaskState>(`/api/tasks/${taskId}`)
+        setDownloadTask(next)
+        refreshOverview()
+        if (next.status === 'completed' || next.status === 'failed' || next.status === 'canceled' || next.status === 'paused') window.clearInterval(timer)
+      } catch (err) {
+        setError(readableApiError(err, '街景下载任务状态刷新失败'))
+      }
     }, 900)
     return () => window.clearInterval(timer)
   }, [downloadTask?.task_id, downloadTask?.status])
@@ -826,10 +888,14 @@ function App() {
     const status = metricsTask?.status
     if (!taskId || (status !== 'running' && status !== 'queued')) return
     const timer = window.setInterval(async () => {
-      const next = await api<TaskState>(`/api/tasks/${taskId}`)
-      setMetricsTask(next)
-      refreshOverview()
-      if (next.status === 'completed' || next.status === 'failed' || next.status === 'canceled' || next.status === 'paused') window.clearInterval(timer)
+      try {
+        const next = await api<TaskState>(`/api/tasks/${taskId}`)
+        setMetricsTask(next)
+        refreshOverview()
+        if (next.status === 'completed' || next.status === 'failed' || next.status === 'canceled' || next.status === 'paused') window.clearInterval(timer)
+      } catch (err) {
+        setError(readableApiError(err, '语义指标任务状态刷新失败'))
+      }
     }, 900)
     return () => window.clearInterval(timer)
   }, [metricsTask?.task_id, metricsTask?.status])
@@ -855,7 +921,7 @@ function App() {
       setSample(result)
       setActiveStep(1)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'OSM 路网加载失败')
+      setError(readableApiError(err, 'OSM 路网加载失败'))
     } finally {
       setSampling(false)
     }
@@ -864,7 +930,7 @@ function App() {
   const startDownload = async () => {
     if (!sample?.points.length) return
     setError('')
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (useCloudQueue || !localBackendEnabled) {
       if (downloadProvider === 'baidu' && !ak.trim()) {
         setError('官方 API Key 下载需要先填写百度 AK。')
         return
@@ -913,14 +979,14 @@ function App() {
       setActiveStep(2)
       refreshOverview()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '下载任务创建失败')
+      setError(readableApiError(err, '下载任务创建失败'))
     }
   }
 
   const testBaiduKey = async () => {
     setError('')
     setKeyTestMessage('')
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (!localBackendEnabled) {
       setError('公网模式不直接测试百度 AK；请提交云端任务，由 NAS Worker 执行真实请求。')
       return
     }
@@ -941,7 +1007,7 @@ function App() {
       })
       setKeyTestMessage(result.ok ? `测试通过：返回 ${result.bytes} bytes 图像` : `测试未通过：${result.message}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '百度 API Key 测试失败')
+      setError(readableApiError(err, '百度 API Key 测试失败'))
     } finally {
       setTestingKey(false)
     }
@@ -949,7 +1015,7 @@ function App() {
 
   const startMetrics = async () => {
     if (!sample?.points.length) return
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (!localBackendEnabled) {
       setError('公网模式不直接运行本地分割任务。请使用“提交云端完整任务”，由 NAS Worker 下载街景、调用模型服务并上传最终 ZIP。')
       return
     }
@@ -996,7 +1062,7 @@ function App() {
       setActiveStep(3)
       refreshOverview()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '指标任务创建失败')
+      setError(readableApiError(err, '指标任务创建失败'))
     }
   }
 
@@ -1121,7 +1187,7 @@ function App() {
 
   const startUploadedImageMetrics = async (files: FileList | null) => {
     if (!files?.length) return
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (!localBackendEnabled) {
       setError('公网模式暂不支持直接上传图片到 Vercel 分割；请在本地模式使用该功能，或提交云端完整任务。')
       return
     }
@@ -1153,7 +1219,7 @@ function App() {
       setActiveStep(3)
       refreshOverview()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传图片分割任务创建失败')
+      setError(readableApiError(err, '上传图片分割任务创建失败'))
     }
   }
 
@@ -1177,7 +1243,7 @@ function App() {
 
   const importBoundaryFile = async (file: File | null) => {
     if (!file) return
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (!localBackendEnabled) {
       setError('公网模式暂不支持导入边界文件；请先用地图绘制研究区，或在本地模式导入文件。')
       return
     }
@@ -1193,13 +1259,13 @@ function App() {
       setSample(null)
       setActiveStep(0)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '边界文件解析失败')
+      setError(readableApiError(err, '边界文件解析失败'))
     }
   }
 
   const importSamplePointFile = async (file: File | null) => {
     if (!file) return
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (!localBackendEnabled) {
       setError('公网模式暂不支持导入采样点文件；请先加载 OSM 路网生成采样点，或在本地模式导入文件。')
       return
     }
@@ -1225,7 +1291,7 @@ function App() {
       }
       setActiveStep(1)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '采样点文件解析失败')
+      setError(readableApiError(err, '采样点文件解析失败'))
     } finally {
       setSampling(false)
     }
@@ -1233,7 +1299,7 @@ function App() {
 
   const importRoadGeoJson = async (file: File | null) => {
     if (!file) return
-    if (!LOCAL_BACKEND_ENABLED) {
+    if (!localBackendEnabled) {
       setError('公网模式暂不支持导入路网文件；请先使用“加载 OSM 路网”，或在本地模式导入文件。')
       return
     }
@@ -1259,7 +1325,7 @@ function App() {
       }
       setActiveStep(1)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '路网文件解析失败')
+      setError(readableApiError(err, '路网文件解析失败'))
     } finally {
       setSampling(false)
     }
@@ -1525,6 +1591,32 @@ function App() {
           onSignUp={signUpCloud}
           onSignOut={signOutCloud}
         />
+        <section className="cloud-card service-card">
+          <div className="cloud-title">
+            <Route size={18} aria-hidden="true" />
+            <h2>NAS 数据服务</h2>
+          </div>
+          <label className="field compact-field">
+            <span>服务地址</span>
+            <input
+              value={localApiBase}
+              onChange={(event) => {
+                setLocalApiBase(event.target.value)
+                setLocalApiStatus('unknown')
+                setLocalApiMessage('地址已修改，请检测连接')
+              }}
+              placeholder="http://NAS-IP:8000"
+            />
+          </label>
+          <div className="service-status-row">
+            <span className={`service-dot ${localApiStatus}`} aria-hidden="true" />
+            <em>{localApiMessage || '用于加载路网、导入 GIS 文件和本地质检'}</em>
+          </div>
+          <button type="button" className="mini-action full" onClick={() => checkLocalApi()} disabled={localApiStatus === 'checking'}>
+            {localApiStatus === 'checking' ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Activity size={16} aria-hidden="true" />}
+            检测连接
+          </button>
+        </section>
 
         <section className="step-guide" aria-label="当前步骤">
           <div>
@@ -1659,7 +1751,7 @@ function App() {
               }}
             />
           </label>
-          <p className="inline-note">生产模式不生成内置网格道路。请加载 OSM 路网，或导入规划/测绘路网、已有采样点。</p>
+          <p className="inline-note">生产模式不生成内置网格道路。路网加载和文件导入需要 NAS 数据服务在线。</p>
           <div className="toggle-grid">
             <label className="toggle">
               <input type="checkbox" checked={osmWalkableOnly} onChange={(event) => setOsmWalkableOnly(event.target.checked)} />
@@ -1674,7 +1766,7 @@ function App() {
               <span>清洗路网</span>
             </label>
           </div>
-          <button type="button" className="secondary-action" onClick={loadOsmRoads} disabled={sampling}>
+          <button type="button" className="secondary-action" onClick={loadOsmRoads} disabled={sampling || !localBackendEnabled}>
             {sampling ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Route size={18} aria-hidden="true" />}
             加载 OSM 路网
           </button>
@@ -1786,12 +1878,12 @@ function App() {
             type="button"
             className="secondary-action"
             onClick={startDownload}
-            disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim()) || (!LOCAL_BACKEND_ENABLED && (cloudSubmitting || hasRunningCloudTask))}
+            disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim()) || (useCloudQueue && (cloudSubmitting || hasRunningCloudTask))}
           >
-            {!LOCAL_BACKEND_ENABLED && cloudSubmitting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Download size={18} aria-hidden="true" />}
-            {LOCAL_BACKEND_ENABLED ? '创建抓图任务' : cloudSubmitting ? '正在提交云端任务' : hasRunningCloudTask ? '云端任务执行中' : '提交云端下载任务'}
+            {useCloudQueue && cloudSubmitting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Download size={18} aria-hidden="true" />}
+            {useCloudQueue ? (cloudSubmitting ? '正在提交云端任务' : hasRunningCloudTask ? '云端任务执行中' : '提交云端下载任务') : '创建本地抓图任务'}
           </button>
-          {!LOCAL_BACKEND_ENABLED ? <p className="inline-note">公网模式会把下载任务提交到 Supabase，由 NAS Worker 执行并上传 ZIP。</p> : null}
+          {useCloudQueue ? <p className="inline-note">公网登录后优先提交 Supabase 队列，由 NAS Worker 执行并上传 ZIP，避免重复任务和浏览器长时间占用。</p> : null}
         </section>
         ) : null}
 
@@ -1903,7 +1995,7 @@ function App() {
                 ))}
               </div>
             ) : finishedMetrics && metricsTask ? (
-              <a className="export-link" href={`${API_BASE}/api/export/${metricsTask.task_id}`}>
+              <a className="export-link" href={`${backendBase}/api/export/${metricsTask.task_id}`}>
                 <FileDown size={16} aria-hidden="true" />
                 导出论文数据包 ZIP
               </a>
@@ -1982,7 +2074,7 @@ function App() {
                 ))}
               </div>
             ) : finishedMetrics && metricsTask ? (
-              <a className="export-link" href={`${API_BASE}/api/export/${metricsTask.task_id}`}>
+              <a className="export-link" href={`${backendBase}/api/export/${metricsTask.task_id}`}>
                 <FileDown size={16} aria-hidden="true" />
                 下载 ZIP
               </a>
@@ -2195,6 +2287,7 @@ function App() {
             icon={<Image size={18} aria-hidden="true" />}
             task={downloadTask}
             onTaskChange={setDownloadTask}
+            request={api}
           />
           ) : null}
 
@@ -2204,6 +2297,7 @@ function App() {
             icon={<Sparkles size={18} aria-hidden="true" />}
             task={metricsTask}
             onTaskChange={setMetricsTask}
+            request={api}
           />
           ) : null}
 
@@ -2275,11 +2369,13 @@ function TaskPanel({
   icon,
   task,
   onTaskChange,
+  request,
 }: {
   title: string
   icon: React.ReactNode
   task: TaskState | null
   onTaskChange: (task: TaskState) => void
+  request: <T>(path: string, options?: RequestInit) => Promise<T>
 }) {
   const [busyAction, setBusyAction] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
@@ -2289,7 +2385,7 @@ function TaskPanel({
 
   const refreshTask = async () => {
     if (!task) return
-    const next = await api<TaskState>(`/api/tasks/${task.task_id}`)
+    const next = await request<TaskState>(`/api/tasks/${task.task_id}`)
     onTaskChange(next)
   }
 
@@ -2297,7 +2393,7 @@ function TaskPanel({
     if (!task) return
     setBusyAction(`${imageId}-${qualityStatus}`)
     try {
-      await api(`/api/tasks/${task.task_id}/quality`, {
+      await request(`/api/tasks/${task.task_id}/quality`, {
         method: 'POST',
         body: JSON.stringify({ image_id: imageId, quality_status: qualityStatus }),
       })
@@ -2311,7 +2407,7 @@ function TaskPanel({
     if (!task) return
     setBusyAction('retry')
     try {
-      await api(`/api/tasks/${task.task_id}/retry-failed`, {
+      await request(`/api/tasks/${task.task_id}/retry-failed`, {
         method: 'POST',
         body: JSON.stringify({}),
       })
@@ -2326,7 +2422,7 @@ function TaskPanel({
     if (!task) return
     setBusyAction(action)
     try {
-      const result = await api<{ ok: boolean; task: TaskState }>(`/api/tasks/${task.task_id}/control`, {
+      const result = await request<{ ok: boolean; task: TaskState }>(`/api/tasks/${task.task_id}/control`, {
         method: 'POST',
         body: JSON.stringify({ action }),
       })
@@ -2363,7 +2459,7 @@ function TaskPanel({
     setBusyAction('batch-exclude')
     try {
       for (const imageId of imageIds) {
-        await api(`/api/tasks/${task.task_id}/quality`, {
+        await request(`/api/tasks/${task.task_id}/quality`, {
           method: 'POST',
           body: JSON.stringify({ image_id: imageId, quality_status: 'excluded' }),
         })
