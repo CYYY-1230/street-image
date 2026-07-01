@@ -815,6 +815,20 @@ input[type="range"] {
   color: #b42318;
 }
 
+.status-good {
+  color: #0f766e;
+  font-weight: 800;
+}
+
+.status-warn {
+  color: #b45309;
+  font-weight: 800;
+}
+
+.status-muted {
+  color: #64748b;
+}
+
 .compact-list {
   display: flex;
   flex-direction: column;
@@ -842,6 +856,34 @@ input[type="range"] {
   gap: 6px;
   align-items: center;
   justify-content: flex-end;
+}
+
+.task-row {
+  align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.task-row:last-child {
+  border-bottom: 0;
+}
+
+.export-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.package-line {
+  min-height: 32px;
+  padding: 8px 0;
+  color: #334155;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.package-line:last-child {
+  border-bottom: 0;
 }
 
 .map-band {

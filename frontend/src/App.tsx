@@ -95,13 +95,6 @@ type TaskState = {
   record_count?: number
 }
 
-type TaskSummary = Omit<TaskState, 'records'> & {
-  record_count: number
-  project_name: string
-  export_url: string
-  created_at: string
-}
-
 type ProjectSummary = {
   project_name: string
   task_count: number
@@ -116,13 +109,18 @@ type ProjectSummary = {
 
 type CloudTask = {
   id: string
+  user_id: string
+  project_id: string | null
   kind: 'download' | 'metrics' | 'download_then_metrics' | 'uploaded_metrics'
   status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled'
+  payload?: Record<string, unknown> | null
   progress: number
   total: number
   succeeded: number
   failed: number
   message: string
+  local_download_task_id?: string | null
+  local_metrics_task_id?: string | null
   artifact_bucket?: string | null
   artifact_path?: string | null
   artifact_size_bytes?: number | null
@@ -154,6 +152,7 @@ type ProjectConfig = {
   selectedMetrics?: string[]
   inferenceMode?: 'external'
   segmentationServiceUrl?: string
+  cloudProjectId?: string | null
   sample: SampleResponse | null
 }
 
@@ -462,13 +461,13 @@ function App() {
   const [error, setError] = useState('')
   const [draftStatus, setDraftStatus] = useState('未保存')
   const [draftReady, setDraftReady] = useState(false)
-  const [recentTasks, setRecentTasks] = useState<TaskSummary[]>([])
   const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([])
   const [cloudUser, setCloudUser] = useState<{ id: string; email?: string } | null>(null)
   const [cloudEmail, setCloudEmail] = useState('')
   const [cloudPassword, setCloudPassword] = useState('')
   const [cloudAuthMessage, setCloudAuthMessage] = useState('')
   const [cloudTasks, setCloudTasks] = useState<CloudTask[]>([])
+  const [cloudProjectId, setCloudProjectId] = useState<string | null>(null)
   const [cloudSubmitting, setCloudSubmitting] = useState(false)
   const cloudSubmitLock = useRef(false)
 
@@ -526,9 +525,10 @@ function App() {
       selectedMetrics,
       inferenceMode,
       segmentationServiceUrl,
+      cloudProjectId,
       sample,
     }),
-    [boundary, boundaryVisible, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
+    [boundary, boundaryVisible, cloudProjectId, concurrency, coordtype, downloadProvider, fov, headings, imageHeight, imageMode, imageWidth, inferenceMode, intervalM, modelName, pitch, projectName, retryCount, roadDensity, sample, segmentationServiceUrl, selectedMetrics, skipExisting, useRealBaidu],
   )
 
   const buildDownloadRequest = () => ({
@@ -564,6 +564,36 @@ function App() {
     segmentation_service_url: segmentationServiceUrl,
   })
 
+  const ensureCloudProject = async () => {
+    if (!supabase || !cloudUser) {
+      throw new Error('公网模式需要先登录云端账号，再由 NAS Worker 领取任务。')
+    }
+    if (cloudProjectId) {
+      await supabase
+        .from('streetscope_projects')
+        .update({
+          name: projectName || '未命名项目',
+          config: { ...projectConfig, cloudProjectId },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', cloudProjectId)
+        .eq('user_id', cloudUser.id)
+      return cloudProjectId
+    }
+    const { data: project, error: projectError } = await supabase
+      .from('streetscope_projects')
+      .insert({
+        user_id: cloudUser.id,
+        name: projectName || '未命名项目',
+        config: projectConfig,
+      })
+      .select('id')
+      .single()
+    if (projectError) throw projectError
+    setCloudProjectId(project.id)
+    return project.id as string
+  }
+
   const submitCloudTask = async (
     kind: CloudTask['kind'],
     payload: Record<string, unknown>,
@@ -579,19 +609,26 @@ function App() {
     cloudSubmitLock.current = true
     setCloudSubmitting(true)
     try {
-      const { data: project, error: projectError } = await supabase
-        .from('streetscope_projects')
-        .insert({
-          user_id: cloudUser.id,
-          name: projectName || '未命名项目',
-          config: projectConfig,
-        })
-        .select('id')
-        .single()
-      if (projectError) throw projectError
+      const projectId = await ensureCloudProject()
+      const { data: activeTasks, error: activeError } = await supabase
+        .from('streetscope_tasks')
+        .select('id, kind, status, progress, total, succeeded, failed, message, local_download_task_id, local_metrics_task_id, artifact_bucket, artifact_path, artifact_size_bytes, error, created_at, updated_at, project_id, user_id, payload')
+        .eq('project_id', projectId)
+        .eq('user_id', cloudUser.id)
+        .in('status', ['queued', 'running'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+      if (activeError) throw activeError
+      if (activeTasks?.length) {
+        setCloudTasks(activeTasks as CloudTask[])
+        setCloudAuthMessage('当前项目已有任务在排队或运行，已为你跳转到任务进度。')
+        setActiveStep(nextStep)
+        await refreshCloudTasks(projectId)
+        return
+      }
       const { error: taskError } = await supabase.from('streetscope_tasks').insert({
         user_id: cloudUser.id,
-        project_id: project.id,
+        project_id: projectId,
         kind,
         status: 'queued',
         payload,
@@ -600,18 +637,24 @@ function App() {
       if (taskError) throw taskError
       setCloudAuthMessage('云端任务已提交。NAS Worker 会自动领取、执行并上传结果。')
       setActiveStep(nextStep)
-      await refreshCloudTasks()
+      await refreshCloudTasks(projectId)
     } finally {
       cloudSubmitLock.current = false
       setCloudSubmitting(false)
     }
   }
 
-  const refreshCloudTasks = async () => {
+  const refreshCloudTasks = async (projectId = cloudProjectId) => {
     if (!supabase || !cloudUser) return
+    if (!projectId) {
+      setCloudTasks([])
+      return
+    }
     const { data, error: cloudError } = await supabase
       .from('streetscope_tasks')
-      .select('id, kind, status, progress, total, succeeded, failed, message, artifact_bucket, artifact_path, artifact_size_bytes, error, created_at, updated_at')
+      .select('id, user_id, project_id, kind, status, payload, progress, total, succeeded, failed, message, local_download_task_id, local_metrics_task_id, artifact_bucket, artifact_path, artifact_size_bytes, error, created_at, updated_at')
+      .eq('project_id', projectId)
+      .eq('user_id', cloudUser.id)
       .order('created_at', { ascending: false })
       .limit(20)
     if (cloudError) {
@@ -660,16 +703,13 @@ function App() {
     await supabase.auth.signOut()
     setCloudUser(null)
     setCloudTasks([])
+    setCloudProjectId(null)
   }
 
   const refreshOverview = async () => {
     if (!LOCAL_BACKEND_ENABLED) return
     try {
-      const [taskResult, projectResult] = await Promise.all([
-        api<{ tasks: TaskSummary[] }>('/api/tasks'),
-        api<{ projects: ProjectSummary[] }>('/api/projects'),
-      ])
-      setRecentTasks(taskResult.tasks)
+      const projectResult = await api<{ projects: ProjectSummary[] }>('/api/projects')
       setRecentProjects(projectResult.projects)
     } catch {
       // Overview is best-effort; task creation and exports should not be blocked by it.
@@ -701,6 +741,7 @@ function App() {
     setSelectedMetrics(config.selectedMetrics?.length ? config.selectedMetrics : defaultSelectedMetrics)
     setSegmentationServiceUrl(config.segmentationServiceUrl ?? DEFAULT_SEGMENTATION_SERVICE_URL)
     setSample(config.sample)
+    setCloudProjectId(config.cloudProjectId ?? null)
     setDownloadTask(null)
     setMetricsTask(null)
     setActiveStep(config.sample ? 1 : 0)
@@ -757,12 +798,15 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!cloudUser) return undefined
+    if (!cloudUser) {
+      setCloudTasks([])
+      return undefined
+    }
     refreshCloudTasks()
     const timer = window.setInterval(refreshCloudTasks, 3000)
     return () => window.clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudUser?.id])
+  }, [cloudUser?.id, cloudProjectId])
 
   useEffect(() => {
     const taskId = downloadTask?.task_id
@@ -1022,6 +1066,59 @@ function App() {
     await refreshCloudTasks()
   }
 
+  const retryCloudTask = async (task: CloudTask) => {
+    if (!supabase || !cloudUser) return
+    const projectId = task.project_id ?? cloudProjectId
+    if (!projectId) {
+      setError('这个失败任务缺少项目 ID，无法安全重试。请重新提交当前项目任务。')
+      return
+    }
+    if (!task.payload) {
+      setError('这个失败任务缺少原始参数，无法自动重试。请重新提交当前项目任务。')
+      return
+    }
+    if (cloudSubmitLock.current) {
+      setError('任务正在提交，请稍等。')
+      return
+    }
+    cloudSubmitLock.current = true
+    setCloudSubmitting(true)
+    setError('')
+    try {
+      const { data: activeTasks, error: activeError } = await supabase
+        .from('streetscope_tasks')
+        .select('id')
+        .eq('project_id', projectId)
+        .eq('user_id', cloudUser.id)
+        .eq('kind', task.kind)
+        .in('status', ['queued', 'running'])
+        .limit(1)
+      if (activeError) throw activeError
+      if (activeTasks?.length) {
+        setCloudAuthMessage('当前项目已有同类任务在排队或运行，不需要重复重试。')
+        await refreshCloudTasks(projectId)
+        return
+      }
+      const { error: retryError } = await supabase.from('streetscope_tasks').insert({
+        user_id: cloudUser.id,
+        project_id: projectId,
+        kind: task.kind,
+        status: 'queued',
+        payload: task.payload,
+        message: `重试：${readableCloudTaskKind(task.kind)}`,
+      })
+      if (retryError) throw retryError
+      setCloudProjectId(projectId)
+      setCloudAuthMessage('已重新提交失败任务，NAS Worker 会继续执行。')
+      await refreshCloudTasks(projectId)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '云端任务重试失败')
+    } finally {
+      cloudSubmitLock.current = false
+      setCloudSubmitting(false)
+    }
+  }
+
   const startUploadedImageMetrics = async (files: FileList | null) => {
     if (!files?.length) return
     if (!LOCAL_BACKEND_ENABLED) {
@@ -1194,6 +1291,8 @@ function App() {
     setCoordtype('bd09ll')
     setDownloadTask(null)
     setMetricsTask(null)
+    setCloudProjectId(null)
+    setCloudTasks([])
     setModelName('Mask2Former + ADE20K')
     setSelectedMetrics(defaultSelectedMetrics)
     setSegmentationServiceUrl('')
@@ -1226,6 +1325,21 @@ function App() {
   const estimateImages = (sample?.points.length ?? 0) * (estimateDirections + estimatePanorama)
   const finishedDownload = downloadTask?.status === 'completed'
   const finishedMetrics = metricsTask?.status === 'completed'
+  const currentCloudRun = cloudTasks.find((task) => task.kind === 'download_then_metrics') ?? null
+  const currentCloudDownload = cloudTasks.find((task) => task.kind === 'download') ?? null
+  const cloudDeliveryTask =
+    cloudTasks.find((task) => task.kind === 'download_then_metrics' && artifactPaths(task).length > 0) ??
+    cloudTasks.find((task) => (task.kind === 'metrics' || task.kind === 'uploaded_metrics') && artifactPaths(task).length > 0) ??
+    null
+  const cloudDeliveryArtifacts = cloudDeliveryTask ? artifactPaths(cloudDeliveryTask) : []
+  const hasRunningCloudTask = cloudTasks.some((task) => task.status === 'queued' || task.status === 'running')
+  const cloudDownloadReady = Boolean(
+    cloudDeliveryTask ||
+      currentCloudDownload?.status === 'completed' ||
+      (currentCloudRun && (currentCloudRun.local_download_task_id || currentCloudRun.progress > 0)),
+  )
+  const cloudMetricsReady = Boolean(cloudDeliveryTask)
+  const deliveryReady = Boolean(cloudDeliveryTask || (finishedMetrics && metricsTask))
   const stepGuides = [
     {
       title: '1. 选择研究区',
@@ -1260,7 +1374,7 @@ function App() {
     if (index === 0) return true
     if (index === 1) return boundaryVisible || Boolean(sample?.points.length)
     if (index === 2 || index === 3) return Boolean(sample?.points.length)
-    return Boolean(sample?.points.length || downloadTask || metricsTask)
+    return Boolean(sample?.points.length || downloadTask || metricsTask || cloudProjectId || cloudTasks.length)
   }
   const goPrevStep = () => setActiveStep((step) => Math.max(0, step - 1))
   const goNextStep = () => setActiveStep((step) => Math.min(workflowSteps.length - 1, step + 1))
@@ -1672,10 +1786,10 @@ function App() {
             type="button"
             className="secondary-action"
             onClick={startDownload}
-            disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim()) || (!LOCAL_BACKEND_ENABLED && cloudSubmitting)}
+            disabled={!sample?.points.length || (imageMode !== 'panorama' && !headings.length) || (downloadProvider === 'baidu' && !ak.trim()) || (!LOCAL_BACKEND_ENABLED && (cloudSubmitting || hasRunningCloudTask))}
           >
             {!LOCAL_BACKEND_ENABLED && cloudSubmitting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Download size={18} aria-hidden="true" />}
-            {LOCAL_BACKEND_ENABLED ? '创建抓图任务' : cloudSubmitting ? '正在提交云端任务' : '提交云端下载任务'}
+            {LOCAL_BACKEND_ENABLED ? '创建抓图任务' : cloudSubmitting ? '正在提交云端任务' : hasRunningCloudTask ? '云端任务执行中' : '提交云端下载任务'}
           </button>
           {!LOCAL_BACKEND_ENABLED ? <p className="inline-note">公网模式会把下载任务提交到 Supabase，由 NAS Worker 执行并上传 ZIP。</p> : null}
         </section>
@@ -1744,10 +1858,10 @@ function App() {
             type="button"
             className="secondary-action"
             onClick={submitCloudFullTask}
-            disabled={!cloudReady || cloudSubmitting || !sample?.points.length || !selectedMetrics.length || !segmentationServiceUrl.trim() || !selectedModelDeployed || (downloadProvider === 'baidu' && !ak.trim())}
+            disabled={!cloudReady || cloudSubmitting || hasRunningCloudTask || !sample?.points.length || !selectedMetrics.length || !segmentationServiceUrl.trim() || !selectedModelDeployed || (downloadProvider === 'baidu' && !ak.trim())}
           >
             {cloudSubmitting ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Cloud size={18} aria-hidden="true" />}
-            提交云端完整任务
+            {hasRunningCloudTask ? '云端任务执行中' : '提交云端完整任务'}
           </button>
           <p className="inline-note">公网使用推荐点“提交云端完整任务”：任务会进入 Supabase 队列，Windows Worker 负责下载、分割并上传最终 ZIP。</p>
           <label className="file-action">
@@ -1772,10 +1886,23 @@ function App() {
             <ul className="review-list">
               <li className={boundaryVisible ? 'ready' : ''}>研究区边界：{boundaryVisible ? '已设置' : '未设置'}</li>
               <li className={sample?.points.length ? 'ready' : ''}>采样点：{sample ? `${formatNumber(sample.points.length)} 个` : '未生成'}</li>
-              <li className={finishedDownload ? 'ready' : ''}>街景图像：{downloadTask ? `${downloadTask.succeeded}/${downloadTask.total}` : '未创建任务'}</li>
-              <li className={finishedMetrics ? 'ready' : ''}>语义指标：{metricsTask ? `${metricsTask.succeeded}/${metricsTask.total}` : '未创建任务'}</li>
+              <li className={finishedDownload || cloudDownloadReady ? 'ready' : ''}>
+                街景图像：{cloudDeliveryTask ? '已打包' : currentCloudDownload ? `${currentCloudDownload.succeeded}/${currentCloudDownload.total || '-'}` : downloadTask ? `${downloadTask.succeeded}/${downloadTask.total}` : '未创建任务'}
+              </li>
+              <li className={finishedMetrics || cloudMetricsReady ? 'ready' : ''}>
+                语义指标：{cloudDeliveryTask ? '已生成' : currentCloudRun ? `${currentCloudRun.succeeded}/${currentCloudRun.total || '-'}` : metricsTask ? `${metricsTask.succeeded}/${metricsTask.total}` : '未创建任务'}
+              </li>
             </ul>
-            {finishedMetrics && metricsTask ? (
+            {cloudDeliveryTask && cloudDeliveryArtifacts.length ? (
+              <div className="export-stack">
+                {cloudDeliveryArtifacts.map((artifactPath, index) => (
+                  <button type="button" className="export-link" key={artifactPath} onClick={() => downloadCloudArtifact(cloudDeliveryTask, artifactPath)}>
+                    <FileDown size={16} aria-hidden="true" />
+                    {cloudDeliveryArtifacts.length > 1 ? `下载论文数据包 ZIP ${index + 1}` : '下载论文数据包 ZIP'}
+                  </button>
+                ))}
+              </div>
+            ) : finishedMetrics && metricsTask ? (
               <a className="export-link" href={`${API_BASE}/api/export/${metricsTask.task_id}`}>
                 <FileDown size={16} aria-hidden="true" />
                 导出论文数据包 ZIP
@@ -1826,67 +1953,59 @@ function App() {
 
         {activeStep === 4 ? (
         <section className="overview-grid" aria-label="项目中心">
-          <div className="surface">
+          <div className="surface delivery-hero">
             <div className="surface-title">
               <Archive size={18} aria-hidden="true" />
-              <h3>当前项目</h3>
+              <h3>交付状态</h3>
             </div>
             <div className="project-summary">
               <strong>{projectName}</strong>
               <span>{sample ? `${formatNumber(sample.points.length)} 个采样点 · ${formatNumber(estimateImages)} 张预计图像` : '尚未生成采样点'}</span>
-              <span>{draftStatus}</span>
+              <span className={deliveryReady ? 'status-good' : hasRunningCloudTask ? 'status-warn' : 'status-muted'}>
+                {deliveryReady ? '最终论文数据包已就绪' : hasRunningCloudTask ? '生产任务执行中，请等待 NAS Worker 完成' : '还没有可交付的最终数据包'}
+              </span>
             </div>
           </div>
 
-          <div className="surface">
+          <div className="surface delivery-actions">
             <div className="surface-title">
-              <Layers size={18} aria-hidden="true" />
-              <h3>近期项目</h3>
+              <FileDown size={18} aria-hidden="true" />
+              <h3>最终下载</h3>
             </div>
-            <div className="compact-list">
-              {recentProjects.slice(0, 3).map((project) => (
-                <div className="compact-row" key={project.project_name}>
-                  <div>
-                    <strong>{project.project_name}</strong>
-                    <span>{project.task_count} 个任务 · 完成 {project.completed_count}</span>
-                  </div>
-                  <em>{project.latest_status}</em>
-                </div>
-              ))}
-              {!recentProjects.length ? <p className="muted">暂无后端任务项目。</p> : null}
-            </div>
-          </div>
-
-          <div className="surface">
-            <div className="surface-title">
-              <Activity size={18} aria-hidden="true" />
-              <h3>本地近期任务</h3>
-            </div>
-            <div className="compact-list">
-              {recentTasks.slice(0, 4).map((task) => (
-                <div className="compact-row" key={task.task_id}>
-                  <div>
-                    <strong>{task.kind === 'download' ? '街景图像' : '语义分割'}</strong>
-                    <span>{task.project_name || '未命名项目'} · {task.status} · {task.progress}%</span>
-                  </div>
-                  <em>{task.succeeded}/{task.total || '-'}</em>
-                </div>
-              ))}
-              {!recentTasks.length ? <p className="muted">任务创建后会显示在这里。</p> : null}
-            </div>
+            {cloudDeliveryTask && cloudDeliveryArtifacts.length ? (
+              <div className="export-stack">
+                {cloudDeliveryArtifacts.map((artifactPath, index) => (
+                  <button type="button" className="export-link" key={artifactPath} onClick={() => downloadCloudArtifact(cloudDeliveryTask, artifactPath)}>
+                    <FileDown size={16} aria-hidden="true" />
+                    {cloudDeliveryArtifacts.length > 1 ? `ZIP ${index + 1}` : '下载 ZIP'}
+                  </button>
+                ))}
+              </div>
+            ) : finishedMetrics && metricsTask ? (
+              <a className="export-link" href={`${API_BASE}/api/export/${metricsTask.task_id}`}>
+                <FileDown size={16} aria-hidden="true" />
+                下载 ZIP
+              </a>
+            ) : (
+              <button type="button" className="export-link" disabled>
+                <FileDown size={16} aria-hidden="true" />
+                等待最终 ZIP
+              </button>
+            )}
+            <p className="inline-note">只保留最终交付包入口；中间过程文件会包含在 ZIP 内。</p>
           </div>
 
           <div className="surface">
             <div className="surface-title">
               <Cloud size={18} aria-hidden="true" />
-              <h3>云端任务</h3>
-              <button type="button" className="mini-action" onClick={refreshCloudTasks} disabled={!cloudReady}>
+              <h3>当前云端任务</h3>
+              <button type="button" className="mini-action" onClick={() => refreshCloudTasks()} disabled={!cloudReady || !cloudProjectId}>
                 刷新
               </button>
             </div>
             <div className="compact-list">
-              {cloudTasks.slice(0, 5).map((task) => (
-                <div className="compact-row" key={task.id}>
+              {cloudTasks.map((task) => (
+                <div className="compact-row task-row" key={task.id}>
                   <div>
                     <strong>{readableCloudTaskKind(task.kind)}</strong>
                     <span className={task.status === 'failed' ? 'task-error-text' : ''}>{task.status} · {task.progress}% · {readableCloudError(task)}</span>
@@ -1895,6 +2014,11 @@ function App() {
                     {task.status === 'queued' ? (
                       <button type="button" className="mini-action" onClick={() => cancelQueuedCloudTask(task)}>
                         取消
+                      </button>
+                    ) : null}
+                    {task.status === 'failed' ? (
+                      <button type="button" className="mini-action" onClick={() => retryCloudTask(task)} disabled={cloudSubmitting}>
+                        重试
                       </button>
                     ) : null}
                     {artifactPaths(task).length ? (
@@ -1909,8 +2033,24 @@ function App() {
                   </div>
                 </div>
               ))}
-              {!cloudReady ? <p className="muted">登录云端账号后显示 Supabase 队列任务。</p> : null}
-              {cloudReady && !cloudTasks.length ? <p className="muted">暂无云端任务。</p> : null}
+              {!cloudReady ? <p className="muted">登录云端账号后，当前项目的 NAS Worker 任务会显示在这里。</p> : null}
+              {cloudReady && !cloudProjectId ? <p className="muted">当前项目还没有提交过云端任务。</p> : null}
+              {cloudReady && cloudProjectId && !cloudTasks.length ? <p className="muted">当前项目暂无云端任务。</p> : null}
+            </div>
+          </div>
+
+          <div className="surface">
+            <div className="surface-title">
+              <Layers size={18} aria-hidden="true" />
+              <h3>数据包结构</h3>
+            </div>
+            <div className="compact-list">
+              <div className="package-line">01_boundary_研究区 / GeoJSON、SHP</div>
+              <div className="package-line">02_road_network_路网 / GeoJSON、SHP</div>
+              <div className="package-line">03_sampling_points_采样点 / CSV、GeoJSON、SHP</div>
+              <div className="package-line">04_streetview_images_街景图像</div>
+              <div className="package-line">05_segmentation_语义分割 / 色块图、掩膜图</div>
+              <div className="package-line">06_metrics_指标表 / image、point 两级 CSV</div>
             </div>
           </div>
         </section>
