@@ -29,10 +29,11 @@ import './App.css'
 import { isSupabaseConfigured, supabase } from './supabaseClient'
 
 const DEFAULT_API_BASE =
-  import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? 'http://192.168.31.56:8000' : 'http://127.0.0.1:8000')
+  import.meta.env.VITE_API_BASE ?? 'http://192.168.31.56:8000'
 const DEFAULT_SEGMENTATION_SERVICE_URL = import.meta.env.VITE_DEFAULT_SEGMENTATION_SERVICE_URL ?? ''
 const PROJECT_DRAFT_KEY = 'streetscope.projectDraft.v1'
 const LOCAL_API_BASE_KEY = 'streetscope.localApiBase.v1'
+const LEGACY_LOCAL_API_BASE = 'http://127.0.0.1:8000'
 
 type Boundary = {
   north: number
@@ -187,6 +188,10 @@ function readableCloudTaskKind(kind: CloudTask['kind']) {
   if (kind === 'download') return '街景下载'
   if (kind === 'metrics') return '语义分割'
   return '上传图片分割'
+}
+
+function isCloudTaskActive(task: CloudTask) {
+  return task.status === 'queued' || task.status === 'running'
 }
 
 function readableCloudError(task: CloudTask) {
@@ -400,8 +405,10 @@ function gviColor(gvi: number) {
   return '#dc2626'
 }
 
-function normalizeApiBase(value: string) {
-  return value.trim().replace(/\/+$/, '')
+function normalizeApiBase(value?: string | null) {
+  const trimmed = value?.trim().replace(/\/+$/, '')
+  if (!trimmed || trimmed === LEGACY_LOCAL_API_BASE) return DEFAULT_API_BASE
+  return trimmed
 }
 
 function readableApiError(err: unknown, fallback: string) {
@@ -487,7 +494,10 @@ function App() {
   const [cloudTasks, setCloudTasks] = useState<CloudTask[]>([])
   const [cloudProjectId, setCloudProjectId] = useState<string | null>(null)
   const [cloudSubmitting, setCloudSubmitting] = useState(false)
-  const [localApiBase, setLocalApiBase] = useState(() => window.localStorage.getItem(LOCAL_API_BASE_KEY) ?? DEFAULT_API_BASE)
+  const [localApiBase, setLocalApiBase] = useState(() => {
+    const savedBase = window.localStorage.getItem(LOCAL_API_BASE_KEY)
+    return normalizeApiBase(savedBase)
+  })
   const [localApiStatus, setLocalApiStatus] = useState<'unknown' | 'checking' | 'ok' | 'failed'>('unknown')
   const [localApiMessage, setLocalApiMessage] = useState('')
   const cloudSubmitLock = useRef(false)
@@ -790,9 +800,10 @@ function App() {
     setModelName(config.modelName)
     setSelectedMetrics(config.selectedMetrics?.length ? config.selectedMetrics : defaultSelectedMetrics)
     setSegmentationServiceUrl(config.segmentationServiceUrl ?? DEFAULT_SEGMENTATION_SERVICE_URL)
-    if (config.localApiBase) setLocalApiBase(config.localApiBase)
+    setLocalApiBase(normalizeApiBase(config.localApiBase))
     setSample(config.sample)
     setCloudProjectId(config.cloudProjectId ?? null)
+    if (!config.cloudProjectId) setCloudTasks([])
     setDownloadTask(null)
     setMetricsTask(null)
     setActiveStep(config.sample ? 1 : 0)
@@ -1369,6 +1380,11 @@ function App() {
 
   const openRecentProject = (project: ProjectSummary) => {
     setProjectName(project.project_name)
+    setDownloadTask(null)
+    setMetricsTask(null)
+    setCloudProjectId(null)
+    setCloudTasks([])
+    setError('')
     setActiveStep(4)
     setView('workspace')
   }
@@ -1391,14 +1407,16 @@ function App() {
   const estimateImages = (sample?.points.length ?? 0) * (estimateDirections + estimatePanorama)
   const finishedDownload = downloadTask?.status === 'completed'
   const finishedMetrics = metricsTask?.status === 'completed'
-  const currentCloudRun = cloudTasks.find((task) => task.kind === 'download_then_metrics') ?? null
-  const currentCloudDownload = cloudTasks.find((task) => task.kind === 'download') ?? null
+  const projectCloudTasks = cloudProjectId ? cloudTasks.filter((task) => task.project_id === cloudProjectId) : []
+  const currentCloudRun = projectCloudTasks.find((task) => task.kind === 'download_then_metrics') ?? null
+  const currentCloudDownload = projectCloudTasks.find((task) => task.kind === 'download') ?? null
+  const completedCloudDownload = projectCloudTasks.find((task) => task.kind === 'download' && artifactPaths(task).length > 0) ?? null
   const cloudDeliveryTask =
-    cloudTasks.find((task) => task.kind === 'download_then_metrics' && artifactPaths(task).length > 0) ??
-    cloudTasks.find((task) => (task.kind === 'metrics' || task.kind === 'uploaded_metrics') && artifactPaths(task).length > 0) ??
+    projectCloudTasks.find((task) => task.kind === 'download_then_metrics' && artifactPaths(task).length > 0) ??
+    projectCloudTasks.find((task) => (task.kind === 'metrics' || task.kind === 'uploaded_metrics') && artifactPaths(task).length > 0) ??
     null
   const cloudDeliveryArtifacts = cloudDeliveryTask ? artifactPaths(cloudDeliveryTask) : []
-  const hasRunningCloudTask = cloudTasks.some((task) => task.status === 'queued' || task.status === 'running')
+  const hasRunningCloudTask = projectCloudTasks.some(isCloudTaskActive)
   const cloudDownloadReady = Boolean(
     cloudDeliveryTask ||
       currentCloudDownload?.status === 'completed' ||
@@ -1440,7 +1458,7 @@ function App() {
     if (index === 0) return true
     if (index === 1) return boundaryVisible || Boolean(sample?.points.length)
     if (index === 2 || index === 3) return Boolean(sample?.points.length)
-    return Boolean(sample?.points.length || downloadTask || metricsTask || cloudProjectId || cloudTasks.length)
+    return Boolean(sample?.points.length || downloadTask || metricsTask || cloudProjectId || projectCloudTasks.length)
   }
   const goPrevStep = () => setActiveStep((step) => Math.max(0, step - 1))
   const goNextStep = () => setActiveStep((step) => Math.min(workflowSteps.length - 1, step + 1))
@@ -1979,10 +1997,10 @@ function App() {
               <li className={boundaryVisible ? 'ready' : ''}>研究区边界：{boundaryVisible ? '已设置' : '未设置'}</li>
               <li className={sample?.points.length ? 'ready' : ''}>采样点：{sample ? `${formatNumber(sample.points.length)} 个` : '未生成'}</li>
               <li className={finishedDownload || cloudDownloadReady ? 'ready' : ''}>
-                街景图像：{cloudDeliveryTask ? '已打包' : currentCloudDownload ? `${currentCloudDownload.succeeded}/${currentCloudDownload.total || '-'}` : downloadTask ? `${downloadTask.succeeded}/${downloadTask.total}` : '未创建任务'}
+                街景图像：{cloudDeliveryTask ? '已包含在最终包' : completedCloudDownload ? '已下载，可继续做语义分割' : currentCloudDownload ? `${currentCloudDownload.succeeded}/${currentCloudDownload.total || '-'}` : downloadTask ? `${downloadTask.succeeded}/${downloadTask.total}` : '未创建任务'}
               </li>
               <li className={finishedMetrics || cloudMetricsReady ? 'ready' : ''}>
-                语义指标：{cloudDeliveryTask ? '已生成' : currentCloudRun ? `${currentCloudRun.succeeded}/${currentCloudRun.total || '-'}` : metricsTask ? `${metricsTask.succeeded}/${metricsTask.total}` : '未创建任务'}
+                语义指标：{cloudDeliveryTask ? '已生成' : currentCloudRun ? `${currentCloudRun.succeeded}/${currentCloudRun.total || '-'}` : metricsTask ? `${metricsTask.succeeded}/${metricsTask.total}` : completedCloudDownload ? '未生成，请提交完整生产任务' : '未创建任务'}
               </li>
             </ul>
             {cloudDeliveryTask && cloudDeliveryArtifacts.length ? (
@@ -2053,8 +2071,14 @@ function App() {
             <div className="project-summary">
               <strong>{projectName}</strong>
               <span>{sample ? `${formatNumber(sample.points.length)} 个采样点 · ${formatNumber(estimateImages)} 张预计图像` : '尚未生成采样点'}</span>
-              <span className={deliveryReady ? 'status-good' : hasRunningCloudTask ? 'status-warn' : 'status-muted'}>
-                {deliveryReady ? '最终论文数据包已就绪' : hasRunningCloudTask ? '生产任务执行中，请等待 NAS Worker 完成' : '还没有可交付的最终数据包'}
+              <span className={deliveryReady ? 'status-good' : hasRunningCloudTask ? 'status-warn' : completedCloudDownload ? 'status-warn' : 'status-muted'}>
+                {deliveryReady
+                  ? '最终论文数据包已就绪'
+                  : hasRunningCloudTask
+                    ? '生产任务执行中，请等待 NAS Worker 完成'
+                    : completedCloudDownload
+                      ? '街景图像已下载，语义指标还未生成'
+                      : '还没有可交付的最终数据包'}
               </span>
             </div>
           </div>
@@ -2096,7 +2120,7 @@ function App() {
               </button>
             </div>
             <div className="compact-list">
-              {cloudTasks.map((task) => (
+              {projectCloudTasks.map((task) => (
                 <div className="compact-row task-row" key={task.id}>
                   <div>
                     <strong>{readableCloudTaskKind(task.kind)}</strong>
@@ -2127,7 +2151,7 @@ function App() {
               ))}
               {!cloudReady ? <p className="muted">登录云端账号后，当前项目的 NAS Worker 任务会显示在这里。</p> : null}
               {cloudReady && !cloudProjectId ? <p className="muted">当前项目还没有提交过云端任务。</p> : null}
-              {cloudReady && cloudProjectId && !cloudTasks.length ? <p className="muted">当前项目暂无云端任务。</p> : null}
+              {cloudReady && cloudProjectId && !projectCloudTasks.length ? <p className="muted">当前项目暂无云端任务。</p> : null}
             </div>
           </div>
 
